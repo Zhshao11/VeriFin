@@ -624,20 +624,31 @@ AGENT_RUNTIME = ToolRuntime(
     index_lock=INDEX_LOCK,
 )
 
-_LLM_STATE: dict[str, object] = {"planner": None, "error": None}
+# LLM 客户端可以共享（无状态、贵在建连），但**调度器必须每次请求新建**：
+# LLMPlanner 自己持有 LLM 调用计数器，共享它的话并发请求会互相偷预算，
+# 表现是"某个请求莫名其妙走了兜底策略"——不报错、只降级（留档 P-015）。
+_CLIENT_STATE: dict[str, object] = {"client": None, "error": None}
 
 
-def _llm_planner():
-    """惰性构造 LLM 调度器。端点不可用时把原因留下，不静默降级。"""
-    if _LLM_STATE["planner"] is not None or _LLM_STATE["error"] is not None:
-        return _LLM_STATE["planner"], _LLM_STATE["error"]
+def _llm_client():
+    """惰性构造 LLM 客户端。端点不可用时把原因留下，不静默降级。"""
+    if _CLIENT_STATE["client"] is not None or _CLIENT_STATE["error"] is not None:
+        return _CLIENT_STATE["client"], _CLIENT_STATE["error"]
     try:
         from verifin.llm import LLMClient
 
-        _LLM_STATE["planner"] = LLMPlanner(LLMClient.from_env())
+        _CLIENT_STATE["client"] = LLMClient.from_env()
     except Exception as exc:  # noqa: BLE001
-        _LLM_STATE["error"] = f"{type(exc).__name__}: {exc}"
-    return _LLM_STATE["planner"], _LLM_STATE["error"]
+        _CLIENT_STATE["error"] = f"{type(exc).__name__}: {exc}"
+    return _CLIENT_STATE["client"], _CLIENT_STATE["error"]
+
+
+def _fresh_planner(max_calls: int):
+    """每次请求一个**新的**调度器 —— 预算按请求隔离。"""
+    client, err = _llm_client()
+    if client is None:
+        return None, err
+    return LLMPlanner(client, max_calls=max_calls), None
 
 
 @app.post("/api/agent")
@@ -646,14 +657,15 @@ def agent_run(req: AskRequest, planner: str = "policy") -> dict:
     use_llm = planner == "llm"
     impl = None
     note = None
+    budget = Budget()
     if use_llm:
-        impl, err = _llm_planner()
+        impl, err = _fresh_planner(budget.max_llm_calls)
         if impl is None:
             note = f"LLM 调度不可用（{err}），本次改用确定性策略"
 
     agent = VeriFinAgent(
         AGENT_RUNTIME,
-        budget=Budget(),
+        budget=budget,
         planner=impl,
         trace=AGENT_TRACE,
         use_llm=impl is not None,

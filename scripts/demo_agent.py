@@ -39,7 +39,10 @@ TRACE_DB = ROOT / "data/index/agent_trace.db"
 
 COMPANY = "贵州茅台酒股份有限公司（600519）"
 PERIOD = "2024 年度（2024-01-01 ~ 2024-12-31）"
-METADATA_SOURCE = "演示配置（封面结构化解析待接入）"
+#: 公司/期间目前取自演示配置 —— 从 PDF 封面做结构化解析尚未接入。
+#: 明写在这里是为了**不让它看起来像从文档里读出来的**：
+#: 六元组的前两个字段必须有明确来源，来源是"配置"就得说"配置"。
+IDENTITY_SOURCE = "演示配置（封面结构化解析未接入）"
 
 UNIT_RE = re.compile(r"单位\s*[:：]\s*(万元|百万元|千元|亿元|元)")
 
@@ -52,39 +55,49 @@ QUESTIONS = [
 ]
 
 
-def detect_unit() -> str:
-    """从解析产物里读披露单位。精确字典匹配，不用宽松正则。"""
-    paths = [PRODUCT] if PRODUCT.exists() else []
+def detect_unit() -> tuple[str, str]:
+    """从解析产物里读披露单位。
+
+    返回 `(单位, 来源说明)` —— 来源必须能被打印出来核对。
+    精确字典匹配，不用宽松正则：宽松匹配会把「编制单位:贵州茅台酒股份有限公司」
+    里的公司名当成货币单位（这个错犯过一次）。
+    """
+    paths: list[Path] = []
     stitched = ROOT / "data/parsed/moutai2024_fs_stitched.md"
     if stitched.exists():
-        paths.insert(0, stitched)
+        paths.append(stitched)
+    if PRODUCT.exists():
+        paths.append(PRODUCT)
+
     for path in paths:
         hit = UNIT_RE.search(path.read_text(encoding="utf-8", errors="ignore"))
         if hit:
-            return hit.group(1)
-    return "元"
+            return hit.group(1), f"解析产物的 单位: 声明（{path.name}）"
+    return "元", "解析产物里没有 单位: 声明，回退为「元」（偏保守，可能产生假阳性）"
 
 
-def build_runtime() -> ToolRuntime:
+def build_runtime() -> tuple[ToolRuntime, str]:
     report = stitch_file(PRODUCT)
     chunks = build_chunks(report.tables, "MOUTAI_2024")
     by_label: dict[str, object] = {}
     for c in chunks:
         by_label.setdefault(c.label, c)
 
+    unit, unit_source = detect_unit()
     index = RetrievalIndex(sqlite3.connect(str(INDEX_DB), check_same_thread=False))
-    return ToolRuntime(
+    runtime = ToolRuntime(
         by_label=by_label,
         index=index,
-        unit=detect_unit(),
+        unit=unit,
         company=COMPANY,
         period=PERIOD,
         pdf_open=lambda: open_pdf(PDF),
         index_lock=threading.Lock(),
     )
+    return runtime, unit_source
 
 
-def print_result(result) -> None:
+def print_result(result, unit_source: str) -> None:
     print(f"\n  问题：{result.question}")
     print(f"  路线：{result.route}   预算：步 {len(result.steps)} / "
           f"工具 {result.tool_calls} / LLM {result.llm_calls}")
@@ -102,7 +115,9 @@ def print_result(result) -> None:
             for k, v in result.answer["six_tuple"].items():
                 print(f"    {k:<6}{v}")
             print(f"    片段：{result.answer['fragment']}")
-            print(f"    元信息来源：{METADATA_SOURCE}")
+            print(f"    指标/数值/单位/来源 来源：检索层 + 表头推导（非模型）")
+            print(f"    单位来源：{unit_source}")
+            print(f"    公司/期间来源：{IDENTITY_SOURCE}")
     else:
         print(f"  ── 结论：{result.decision} ─────────────────────────")
         print(f"    原因 {result.refusal['reason']}")
@@ -118,8 +133,9 @@ def main() -> int:
     print("=== 一、显式图结构 ===")
     print(render_graph_text())
 
-    runtime = build_runtime()
-    print(f"\n索引装载完成：科目 {len(runtime.by_label)} 条，披露单位 {runtime.unit}")
+    runtime, unit_source = build_runtime()
+    print(f"\n索引装载完成：科目 {len(runtime.by_label)} 条，披露单位 {runtime.unit}"
+          f"（来源：{unit_source}）")
 
     planner = None
     use_llm = False
@@ -143,7 +159,7 @@ def main() -> int:
     questions = QUESTIONS + (args.question or [])
     print("\n=== 二、逐题运行 ===")
     for q in questions:
-        print_result(agent.run(q))
+        print_result(agent.run(q), unit_source)
 
     print("\n=== 三、轨迹入库 ===")
     print(f"  库：{TRACE_DB.relative_to(ROOT)}   运行数：{len(trace.runs())}")

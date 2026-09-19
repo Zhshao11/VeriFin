@@ -11,7 +11,7 @@
 
 <p align="center">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
-  <img alt="Tests" src="https://img.shields.io/badge/Tests-189%20passed-2EA043">
+  <img alt="Tests" src="https://img.shields.io/badge/Tests-190%20passed-2EA043">
   <img alt="Parser" src="https://img.shields.io/badge/Parser-MinerU%204.0-337ab7">
   <img alt="Locator" src="https://img.shields.io/badge/Locator-PyMuPDF%201.28-ff6f00">
   <img alt="Index" src="https://img.shields.io/badge/Index-SQLite%20FTS5-003B57?logo=sqlite&logoColor=white">
@@ -121,7 +121,7 @@ cp .env.example .env
 其他入口：
 
 ```bash
-.venv/bin/python -m pytest                      # 189 项测试
+.venv/bin/python -m pytest                      # 190 项测试
 .venv/bin/python scripts/demo_core.py           # 抽取 → span 校验 → 勾稽核验 → 拒答
 .venv/bin/python scripts/demo_agent.py          # Agent 端到端（加 --llm 用 LLM 做调度）
 .venv/bin/python scripts/parse_mineru_md.py     # MinerU 解析 + 恒等式自检
@@ -157,6 +157,8 @@ cp .env.example .env
 
 - **2026-09-19** Agent 编排落地（D3）：显式图 + 6 个工具 + 三重预算 + 执行轨迹入库。
   **LLM 只选节点、参数由图填** —— 让「LLM 不产生数字」这条红线在编排层也成立
+- **2026-09-19** 编排层的并发与溯源修正：调度器改为每请求新建（预算不跨请求共享），
+  轨迹库加写锁；修正演示输出里把「单位来源」误报成「演示配置」的溯源错误
 - **2026-09-19** Web 演示页新增 Agent 编排区块：逐步轨迹 + 降级标记 + 历史运行回放
 - **2026-09-19** 检索层落地：四路召回（label / lexical / numeric / vector）+ RRF(k=60) 融合；`Embedder` 做成可插拔协议，本地 `TfidfEmbedder` 兜底
 - **2026-09-19** PyMuPDF 坐标层落地：词级容错匹配 + 同行垂直重叠校验 + 原文高亮 PNG 导出
@@ -346,7 +348,7 @@ VeriFin/
 │   ├── parse_mineru_md.py# MinerU 解析 + 恒等式自检
 │   ├── bootstrap_env.sh  # 环境引导（含 pip sdist 绕行）
 │   └── check_llm.py      # 端点能力探测
-├── tests/                # 189 项测试
+├── tests/                # 190 项测试
 └── docs/                 # 选型 / 缺陷留档 / 接手入口
 ```
 
@@ -384,7 +386,7 @@ LLM_MODEL=your-model-name
 |---|---|---|
 | `test_formulas.py` | 36 | 勾稽公式、容差推导、三级结论 |
 | `test_tables.py` | 32 | 双序列化解析、跨页拼接、数值列推导 |
-| `test_agent.py` | 33 | 图结构合法性、路线分流、六元组装配、拒答、预算终止、降级标记、轨迹回放 |
+| `test_agent.py` | 34 | 图结构合法性、路线分流、六元组装配、拒答、预算终止、降级标记、轨迹回放与并发写 |
 | `test_normalize.py` | 27 | 单位换算、全角半角、千分位 |
 | `test_geometry.py` | 21 | 容错匹配、折行标签、同行校验、页码边界 |
 | `test_span.py` | 20 | span 硬校验两层关卡 |
@@ -474,12 +476,15 @@ LLM_MODEL=your-model-name
 7. **编排层的兜底策略不会真正重试检索**。「换关键词重搜」只在 LLM 调度时发生；
    LLM 全程不可用时，第一次没召回到就必然拒答。这是刻意选择 ——
    宁可漏答，也不要因重试把预算烧光后给出语焉不详的 `ABORT`。
-8. **Web 服务内共享一个调度器**，并发请求会互相消耗 LLM 预算（不会产生错误答案，只是更容易降级）。
-   单用户演示无影响；并发评测前需改为 per-request 实例。
+8. **并发尚未做压测**。调度器已改为**每请求一个实例**（预算不跨请求共享），
+   轨迹库也加了写锁并有单测覆盖并发写；但没有真实并发负载验证，只保证逻辑正确。
 9. **没有现成的可观测性生态**。编排层未引入任何 Agent 框架，
    因此也没有 Logfire / OTel 那类追踪，`trace.py` 的 SQLite 轨迹是唯一手段。
 10. **「不用 Pydantic AI」这一条是范式判断，不是实测否决** —— 本项目从未安装过它。
     如实列出，避免被追问时说不清依据（完整论证见 `docs/技术问题留档.md` P-013）。
+11. **六元组的「公司 / 期间」目前取自演示配置**，不是从 PDF 封面解析出来的。
+    单位则是**真从解析产物读的**（`单位:` 声明，精确字典匹配，读不到才回退「元」）。
+    封面结构化解析未接入 —— 这是一个明确的缺口，不能当成已完成。
 
 ---
 

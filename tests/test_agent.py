@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -495,5 +496,45 @@ def test_trace_records_refusal_reason():
         result = agent.run("火星基地折旧年限")
         rows = [r for r in store.runs() if r["run_id"] == result.run_id]
         assert rows and rows[0]["reason"] == "NO_RECALL"
+    finally:
+        store.close()
+
+
+def test_trace_store_survives_concurrent_writes():
+    """轨迹库要能被 Web 服务多线程共用。
+
+    `check_same_thread=False` 只是**允许**跨线程访问，不等于**安全**：
+    两个请求同时 execute + commit 会出现事务交错错误。
+    """
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    db = TMP_DIR / f"trace_concurrent_{datetime.now().strftime('%H%M%S%f')}.db"
+    store = TraceStore(db)
+    errors: list[BaseException] = []
+    done = threading.Barrier(4)
+
+    def worker(n: int) -> None:
+        try:
+            done.wait(timeout=5)  # 尽量让四个线程真的同时写
+            for i in range(10):
+                rid = f"run{n}-{i}"
+                store.start_run(rid, f"q{n}-{i}", route="LOOKUP")
+                store.record_step(
+                    rid, 0, node="INTENT", tool=None, args={"n": n},
+                    ok=True, detail="d", source="policy",
+                )
+                store.finish_run(rid, decision="ANSWER", steps=1)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    try:
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert not errors, f"并发写入报错：{errors[:3]}"
+        assert len(store.runs()) == 40, "并发写入丢记录"
+        for n in range(4):
+            assert len(store.steps(f"run{n}-9")) == 1
     finally:
         store.close()

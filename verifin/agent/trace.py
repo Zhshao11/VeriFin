@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,27 +55,36 @@ def utc_now() -> str:
 
 
 class TraceStore:
-    """追加写的轨迹库。"""
+    """追加写的轨迹库。
+
+    `check_same_thread=False` 是为了让 Web 服务（多线程）能共用一个库。
+    但**允许跨线程访问 ≠ 跨线程安全**：两个请求同时 `execute` + `commit`
+    会出现"在一个事务里又开一个事务"这类交错错误。
+    因此所有读写都过一把锁 —— 轨迹写入本来就很轻，串行化不会成为瓶颈。
+    """
 
     def __init__(self, db_path: str | Path) -> None:
         self.path = Path(db_path)
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self._con = sqlite3.connect(str(self.path), check_same_thread=False)
+        self._lock = threading.Lock()
         self._con.executescript(_SCHEMA)
         self._con.commit()
 
     def close(self) -> None:
-        self._con.close()
+        with self._lock:
+            self._con.close()
 
     # ---------------------------------------------------------------- 写
     def start_run(self, run_id: str, question: str, *, route: str | None = None) -> None:
-        self._con.execute(
-            "INSERT OR REPLACE INTO runs(run_id, question, started_at, route)"
-            " VALUES (?,?,?,?)",
-            (run_id, question, utc_now(), route),
-        )
-        self._con.commit()
+        with self._lock:
+            self._con.execute(
+                "INSERT OR REPLACE INTO runs(run_id, question, started_at, route)"
+                " VALUES (?,?,?,?)",
+                (run_id, question, utc_now(), route),
+            )
+            self._con.commit()
 
     def record_step(
         self,
@@ -88,20 +98,21 @@ class TraceStore:
         detail: str,
         source: str,
     ) -> None:
-        self._con.execute(
-            "INSERT OR REPLACE INTO steps(run_id, seq, node, tool, args, ok, detail, source)"
-            " VALUES (?,?,?,?,?,?,?,?)",
-            (
-                run_id,
-                seq,
-                node,
-                tool,
-                json.dumps(args or {}, ensure_ascii=False),
-                None if ok is None else int(ok),
-                detail[:800],
-                source,
-            ),
-        )
+        with self._lock:
+            self._con.execute(
+                "INSERT OR REPLACE INTO steps(run_id, seq, node, tool, args, ok, detail, source)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    seq,
+                    node,
+                    tool,
+                    json.dumps(args or {}, ensure_ascii=False),
+                    None if ok is None else int(ok),
+                    detail[:800],
+                    source,
+                ),
+            )
 
     def finish_run(
         self,
@@ -115,40 +126,44 @@ class TraceStore:
         budget_exceeded: bool = False,
         planner_source: str = "policy",
     ) -> None:
-        self._con.execute(
-            "UPDATE runs SET ended_at=?, decision=?, reason=?, steps=?, tool_calls=?,"
-            " llm_calls=?, budget_exceeded=?, planner_source=? WHERE run_id=?",
-            (
-                utc_now(),
-                decision,
-                reason,
-                steps,
-                tool_calls,
-                llm_calls,
-                int(budget_exceeded),
-                planner_source,
-                run_id,
-            ),
-        )
-        self._con.commit()
+        with self._lock:
+            self._con.execute(
+                "UPDATE runs SET ended_at=?, decision=?, reason=?, steps=?, tool_calls=?,"
+                " llm_calls=?, budget_exceeded=?, planner_source=? WHERE run_id=?",
+                (
+                    utc_now(),
+                    decision,
+                    reason,
+                    steps,
+                    tool_calls,
+                    llm_calls,
+                    int(budget_exceeded),
+                    planner_source,
+                    run_id,
+                ),
+            )
+            self._con.commit()
 
     def commit(self) -> None:
-        self._con.commit()
+        with self._lock:
+            self._con.commit()
 
     # ---------------------------------------------------------------- 读
     def runs(self) -> list[sqlite3.Row]:
-        self._con.row_factory = sqlite3.Row
-        return list(
-            self._con.execute("SELECT * FROM runs ORDER BY started_at DESC")
-        )
+        with self._lock:
+            self._con.row_factory = sqlite3.Row
+            return list(
+                self._con.execute("SELECT * FROM runs ORDER BY started_at DESC")
+            )
 
     def steps(self, run_id: str) -> list[sqlite3.Row]:
-        self._con.row_factory = sqlite3.Row
-        return list(
-            self._con.execute(
-                "SELECT * FROM steps WHERE run_id=? ORDER BY seq", (run_id,)
+        with self._lock:
+            self._con.row_factory = sqlite3.Row
+            return list(
+                self._con.execute(
+                    "SELECT * FROM steps WHERE run_id=? ORDER BY seq", (run_id,)
+                )
             )
-        )
 
     def abbreviated(self, run_id: str) -> str:
         """回放一条轨迹的可读形式，用于演示与失败案例归档。"""
