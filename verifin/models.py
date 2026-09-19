@@ -7,7 +7,7 @@ Pydantic 校验错误，整个抽取动作失败。而我们想要的语义是
 「这条证据字段不全 → 该证据作废 → 不足以回答 → 拒答」，
 是一等业务结果，不是异常。
 
-所以这里让字段可空，由 :func:`fin_verify.normalize.find_missing_fields`
+所以这里让字段可空，由 :func:`verifin.normalize.find_missing_fields`
 在业务层做完整性判定，把「缺字段」变成可统计、可报告的拒答原因，
 而不是一个需要 try/except 的崩溃点。
 """

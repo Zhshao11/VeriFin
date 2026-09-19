@@ -2,15 +2,15 @@
 
 本包承载项目的三条红线，其余模块（解析、检索、编排）都建立在这三层之上：
 
-1. :mod:`fin_verify.normalize` —— 数字与文本归一化。
+1. :mod:`verifin.normalize` —— 数字与文本归一化。
    让 `12,345.67`、`12345.67`、`1.23亿元` 归到同一个规范形式，
    这是「数字精确匹配」的地基。
 
-2. :mod:`fin_verify.span` —— span 硬校验。
+2. :mod:`verifin.span` —— span 硬校验。
    模型报数必须同时回吐原文片段，由程序做字符串级校验。
    把「模型是否撒谎」这个不可验证的问题，转成「字符串在不在原文里」这个可判定的问题。
 
-3. :mod:`fin_verify.formulas` —— 勾稽公式注册表。
+3. :mod:`verifin.formulas` —— 勾稽公式注册表。
    算术全部走 :class:`decimal.Decimal`，模型只选公式不算数；
    容差由报表披露单位推导，核验结论分 PASS / WARN / FAIL 三级。
 
@@ -18,10 +18,10 @@
 这样核验逻辑可以脱离 LLM、脱离解析层单独测试，
 也保证了即使模型服务或解析器不可用，这套判定规则依然可以被验证。
 依赖第三方库的部分（Pydantic 数据模型、LLM 客户端）分别放在
-:mod:`fin_verify.models` 与 :mod:`fin_verify.llm`，需要时再显式导入。
+:mod:`verifin.models` 与 :mod:`verifin.llm`，需要时再显式导入。
 """
 
-from fin_verify.compute import (
+from verifin.compute import (
     ZERO,
     pct_change,
     quantize_amount,
@@ -29,7 +29,7 @@ from fin_verify.compute import (
     safe_div,
     to_yuan,
 )
-from fin_verify.formulas import (
+from verifin.formulas import (
     FORMULA_REGISTRY,
     Formula,
     FormulaKind,
@@ -43,7 +43,7 @@ from fin_verify.formulas import (
     evaluate_formula,
     suspect_operands,
 )
-from fin_verify.normalize import (
+from verifin.normalize import (
     ParsedAmount,
     find_missing_fields,
     normalize_text,
@@ -51,7 +51,7 @@ from fin_verify.normalize import (
     parse_single_amount,
     unit_scale,
 )
-from fin_verify.span import (
+from verifin.span import (
     EvidenceVerdict,
     MatchMode,
     SpanHit,

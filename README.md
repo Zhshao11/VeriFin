@@ -1,10 +1,10 @@
-# 财报核验 Agent
+# VeriFin · 财报核验 Agent
 
 > 从上市公司年报 PDF 中检索证据，给出**每个数字都能点回原文页码**的答案，并自动核验财务勾稽关系。找不到证据就拒答。
 
-> **当前状态：核心核验层已实现并通过测试，解析层与检索层待接入。**
-> 已完成：数字归一化、span 硬校验、6 类勾稽公式、LLM 客户端、端到端演示（83 项测试通过）
-> 待接入：MinerU 解析、混合检索、Agent 编排与工具契约、FinanceBench 评测
+> **当前状态：核验层 / 解析层 / 坐标层 / 检索层已落地（156 项测试通过），Agent 编排与评测进行中。**
+> 已完成：数字归一化、span 硬校验、勾稽公式、MinerU 双路解析、跨页表格拼接、PyMuPDF 坐标层（含原文高亮导出）、四路混合检索 + RRF 融合、端到端证据演示
+> 进行中：Agent 编排（显式图 + 工具集 + 预算控制）、FinanceBench 与自建评测集
 
 ---
 
@@ -52,9 +52,15 @@ cp .env.example .env
 # 4. 跑端到端演示：抽取 → span 校验 → 勾稽核验 → 拒答
 .venv/bin/python scripts/demo_core.py
 
-# 5. 探测 LLM 通道能力（工具调用 / 结构化输出）
+# 5. 全链路演示：解析 → 跨页拼接 → 四路检索 → 坐标定位 → 导出原文高亮图
+.venv/bin/python scripts/demo_evidence.py
+
+# 6. 探测 LLM 通道能力（工具调用 / 结构化输出）
 .venv/bin/python scripts/check_llm.py
 ```
+
+> 解析层与检索层依赖较重，按需安装：`.venv/bin/pip install -e ".[parse,retrieve]"`
+> 本机 pip 无法解包 sdist 时，用 `scripts/bootstrap_env.sh`（内含 sdist 绕行方案）。
 
 `.env` 只需要三个变量，任何 OpenAI 兼容端点都可以：
 
@@ -80,11 +86,11 @@ LLM_MODEL=your-model-name
 
 ### 三层防幻觉机制
 
-**第一层：数字归一化**（`fin_verify/normalize.py`）
+**第一层：数字归一化**（`verifin/normalize.py`）
 
 embedding 会把 `12,345.67`、`12345.67`、`1.23亿元` 当成三个无关词串，所以纯向量检索找财务数字必然失败。进入索引前必须做确定性归一化：全角转半角 → 去千分位 → 数值与单位分离 → 统一到「元」。
 
-**第二层：span 硬校验**（`fin_verify/span.py`）
+**第二层：span 硬校验**（`verifin/span.py`）
 
 模型报出数值时，**必须同时回吐它认为的原文片段**，程序执行字符串级校验。
 
@@ -97,7 +103,7 @@ embedding 会把 `12,345.67`、`12345.67`、`1.23亿元` 当成三个无关词�
 
 只做第 1 层是不够的——模型完全可以引用一段真实存在的原文，却报出一个错误的数字，第一层会放行。这种错误在财务场景里最危险，因为它读起来「有据可查」。
 
-**第三层：容差由披露单位推导**（`fin_verify/formulas.py`）
+**第三层：容差由披露单位推导**（`verifin/formulas.py`）
 
 ```
 容差 = 参与科目数 × 0.5 × 报表披露单位
@@ -137,21 +143,31 @@ embedding 会把 `12,345.67`、`12345.67`、`1.23亿元` 当成三个无关词�
 ## 目录结构
 
 ```
-fin-verify-agent/
-├── fin_verify/
+VeriFin/
+├── verifin/
 │   ├── normalize.py      # 数字/文本归一化（stdlib，无第三方依赖）
 │   ├── span.py           # span 硬校验 —— 防幻觉核心（stdlib）
 │   ├── compute.py        # Decimal 计算原语（stdlib）
 │   ├── formulas.py       # 勾稽公式注册表 + 容差推导（stdlib）
+│   ├── tables.py         # 表格抽取 + 跨页表格拼接（HTML 表 / markdown 管道表 双路解析）
+│   ├── geometry.py       # PyMuPDF 坐标层：容错定位 + 同行校验 + 原文高亮导出
+│   ├── lexicon.py        # 财务专用词典（jieba 不认识会计科目，必须注入）
+│   ├── retrieval.py      # 四路检索 + RRF 融合 + 可插拔 Embedder
 │   ├── models.py         # Pydantic 数据模型 + JSON Schema
 │   └── llm.py            # OpenAI 兼容客户端，带结构化输出降级
 ├── scripts/
-│   ├── demo_core.py      # 端到端演示
+│   ├── demo_core.py      # 端到端演示：抽取 → 校验 → 勾稽 → 拒答
+│   ├── demo_evidence.py  # 全链路：解析 → 检索 → 坐标定位 → 高亮图
+│   ├── parse_mineru_md.py# MinerU 解析 + 恒等式自检
+│   ├── bootstrap_env.sh  # 环境引导（含 pip sdist 绕行）
 │   └── check_llm.py      # 通道能力探测
-├── tests/                # 83 项测试
+├── tests/                # 156 项测试
 └── docs/
-    ├── 财报核验Agent-方案设计-v0.1.md
-    └── 开源底座选型与二次开发方案-v0.1.md
+    ├── 项目上下文速览-v1.0.md    # 新会话接手入口
+    ├── 技术选型-v1.1.md          # 选型唯一权威来源
+    ├── 技术问题留档.md           # 设计与口径缺陷归档（P-001 ~ P-011）
+    ├── 开源底座选型与二次开发方案-v0.1.md
+    └── 财报核验Agent-方案设计-v0.1.md
 ```
 
 **一个刻意的设计**：`normalize` / `span` / `compute` / `formulas` 这四个核心模块**只依赖 Python 标准库**。核验规则可以脱离 LLM、脱离解析层单独测试；即使模型服务或解析器不可用，判定逻辑依然可验证。
@@ -163,8 +179,12 @@ fin-verify-agent/
 | 层 | 选型 | 为什么 |
 |---|---|---|
 | 语言 | Python 3.11+ | — |
-| PDF 解析 | MinerU 4.0 + PyMuPDF 双解析层 | MinerU 出表格与结构，PyMuPDF 出绝对坐标与精确页码 |
-| 检索 | SQLite FTS5(jieba) + numpy 向量 → RRF 融合 | 单报告仅 1k–5k 块，不需要向量库 |
+| PDF 解析 | MinerU 4.0 + PyMuPDF 双解析层 | MinerU 出表格与页码，PyMuPDF 出绝对坐标（PDF point） |
+| 降级链 | MinerU → Docling → pdfplumber → PyMuPDF | 逐级放弃表格结构，评测时如实报告降级 |
+| 检索 | **四路召回 → RRF(k=60)**：`label`（精确科目名）/ `lexical`（FTS5 + jieba）/ `numeric`（Decimal 精确）/ `vector`（TF-IDF 余弦） | 单报告仅 1k–5k 块，不需要向量库 |
+| 中文分词 | jieba + 财务专用词典（~140 条术语） | jieba 默认词典会把「营业收入」切成「营业」+「收入」 |
+| 向量底座 | 可插拔 `Embedder` + 本地 `TfidfEmbedder` | 实测所用端点的 `/v1/embeddings` 全量 404，无 embedding 能力 |
+| 坐标层 | PyMuPDF 词级容错匹配 + 同行校验 + 高亮导出 | 长科目名在 PDF 里会折行，`search_for` 不容忍字距空白 |
 | Agent 编排 | Pydantic AI 显式图 + LLM 自主工具选择 | 循环与分支可视化，便于讲解与复盘 |
 | 存储 | SQLite 单文件 | 零运维，单进程 |
 | 计算 | `decimal.Decimal`（禁止 float） | 精度硬要求 |
@@ -189,14 +209,17 @@ fin-verify-agent/
 
 ## 后续计划
 
-| 阶段 | 工作 |
-|---|---|
-| D1 | 接入 MinerU，把真实年报解析成带页码的块 |
-| D2 | 建索引（FTS5 + jieba / numpy 向量 / RRF），接上检索 |
-| D3 | Agent 编排：显式图 + 6 个工具 + 预算控制 + 执行轨迹入库 |
-| D4 | 评测集构建与 V0/V1 基线 |
-| D5 | V2 完整版 + 消融实验 |
-| D6 | 失败案例归档 + 演示 + 收尾 |
+| 阶段 | 工作 | 状态 |
+|---|---|---|
+| D1 | 接入 MinerU，把真实年报解析成带页码的块 | ✅ 已完成 |
+| D2 | 四路检索（label / lexical / numeric / vector）+ RRF 融合 | ✅ 已完成 |
+| D2b | PyMuPDF 坐标层 + 原文高亮导出 | ✅ 已完成 |
+| D3 | Agent 编排：显式图 + 6 个工具 + 预算控制 + 执行轨迹入库 | 🔜 进行中 |
+| D4 | 评测集构建与 V0/V1 基线 | ⬜ 待开始 |
+| D5 | V2 完整版 + 消融实验 | ⬜ 待开始 |
+| D6 | 失败案例归档 + 演示 + 收尾 | ⬜ 待开始 |
+
+设计与口径缺陷归档见 `docs/技术问题留档.md`（P-001 ~ P-011，含「跨页表格不合并」「附注列被当金额」「端点无 embedding」等）。
 
 ---
 
@@ -205,3 +228,6 @@ fin-verify-agent/
 1. **`value_matches_span` 不区分数字的语义角色**。片段含日期时（如 `2023-12-31`），年份 `2023` 会被当作一个金额。这是刻意接受的取舍——真正的语义归属由表格结构层负责，此处只做一道廉价的合理性闸门。计数「引用支持度」时应将本函数作为必要条件而非充分条件。
 2. **`suspect_operands` 只能从现有操作数的量级定位矛盾字段**。若出错的项目根本没被抽取（如漏了少数股东权益），它无法定位，只能靠公式自带的「常见漏项」线索。注释中已标注这是启发式排序，不是归因结论。
 3. **`parse_amounts` 会把日期中的年份识别为金额**。同上，语义层不在此模块。
+4. **向量通道用的是本地 TF-IDF，不是真实 embedding**。实测所用端点的 `/v1/embeddings` 全量 404、`/v1/models` 中 embedding 类模型计数为 0，因此 `Embedder` 做成可插拔协议，接入真实 embedding 只需替换实现。当前语义泛化能力弱于真实 embedding 模型。
+5. **坐标层依赖 PDF 内嵌文本层**。扫描版（图片型）PDF 没有文本层，`locate_row` 定位不到，需要先接 OCR 通道。当前解析对象是文本型年报 PDF。
+6. **跨页表格拼接依赖「续页不带表头」这一约定**。若发行人重复打印了表头，会把续页误判为新表；当前按「无表头即续表」处理。

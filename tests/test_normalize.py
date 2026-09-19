@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from fin_verify.normalize import (
+from verifin.normalize import (
     find_missing_fields,
     is_known_unit,
     normalize_text,

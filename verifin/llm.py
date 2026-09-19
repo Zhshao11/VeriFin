@@ -21,7 +21,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from fin_verify.models import EVIDENCE_JSON_SCHEMA, ExtractionResult
+from verifin.models import EVIDENCE_JSON_SCHEMA, ExtractionResult
 
 __all__ = ["LLMError", "CallRecord", "LLMClient"]
 

@@ -24,7 +24,7 @@ from decimal import (
     InvalidOperation,
 )
 
-from fin_verify.normalize import UNIT_MULTIPLIER
+from verifin.normalize import UNIT_MULTIPLIER
 
 __all__ = [
     "ZERO",
@@ -57,7 +57,7 @@ def to_yuan(value: Decimal, unit: str | None) -> Decimal:
     Note:
         无法识别的单位会被静默按「元」处理。调用方若需要区分
         「单位已知」与「单位缺失」，应同时检查
-        :func:`fin_verify.normalize.is_known_unit`。
+        :func:`verifin.normalize.is_known_unit`。
     """
     if not isinstance(value, Decimal):
         raise TypeError(

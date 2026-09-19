@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fin_verify.tables import stitch_file  # noqa: E402
+from verifin.tables import stitch_file  # noqa: E402
 
 DEFAULT_PRODUCT = "data/parsed/moutai2024_fs"
 

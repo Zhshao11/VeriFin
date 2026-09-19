@@ -19,9 +19,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from fin_verify.geometry import open_pdf  # noqa: E402
-from fin_verify.retrieval import build_chunks, create_index, load_index  # noqa: E402
-from fin_verify.tables import stitch_file  # noqa: E402
+from verifin.geometry import open_pdf  # noqa: E402
+from verifin.retrieval import build_chunks, create_index, load_index  # noqa: E402
+from verifin.tables import stitch_file  # noqa: E402
 
 PDF = ROOT / "data/pdfs/MOUTAI_2024_ANNUAL.pdf"
 PRODUCT = ROOT / "data/parsed/moutai2024_fs"

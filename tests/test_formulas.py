@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from fin_verify.formulas import (
+from verifin.formulas import (
     FORMULA_REGISTRY,
     FormulaKind,
     Verdict,

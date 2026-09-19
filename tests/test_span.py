@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 
-from fin_verify.span import (
+from verifin.span import (
     REASON_EMPTY_SPAN,
     REASON_SPAN_NOT_FOUND,
     REASON_VALUE_NOT_IN_SPAN,

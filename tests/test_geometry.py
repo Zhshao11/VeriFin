@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from fin_verify.geometry import (
+from verifin.geometry import (
     DEFAULT_ROW_TOLERANCE,
     BBox,
     PdfGeometry,

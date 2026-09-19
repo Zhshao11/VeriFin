@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from fin_verify.lexicon import clean_label
-from fin_verify.retrieval import (
+from verifin.lexicon import clean_label
+from verifin.retrieval import (
     DEFAULT_RRF_K,
     Chunk,
     build_chunks,
@@ -22,7 +22,7 @@ from fin_verify.retrieval import (
     rrf_fuse,
     tokenize,
 )
-from fin_verify.tables import stitch_file
+from verifin.tables import stitch_file
 
 PRODUCT = Path("data/parsed/moutai2024_fs")
 needs_product = pytest.mark.skipif(

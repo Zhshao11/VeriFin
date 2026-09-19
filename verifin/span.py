@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
-from fin_verify.normalize import (
+from verifin.normalize import (
     UNIT_MULTIPLIER,
     normalize_text,
     parse_amounts,

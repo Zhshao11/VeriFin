@@ -5,7 +5,7 @@
 但实测中同一段输入、同一个模型，有时返回 7 个字段，有时只返回 5 个。
 如果端点接受了 ``strict: true`` 却并未真正强制必填字段，
 那「结构化输出」就不能作为字段完整性的保障，
-必须由程序侧的 :func:`fin_verify.normalize.find_missing_fields` 兜底。
+必须由程序侧的 :func:`verifin.normalize.find_missing_fields` 兜底。
 
 本脚本用同一份输入重复调用 N 次，统计：
 - 返回全部 7 个字段的比例
@@ -28,10 +28,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from fin_verify.llm import LLMClient, LLMError  # noqa: E402
-from fin_verify.models import SIX_TUPLE_JSON_SCHEMA  # noqa: E402
-from fin_verify.normalize import SIX_TUPLE_FIELDS  # noqa: E402
-from fin_verify.span import verify_evidence  # noqa: E402
+from verifin.llm import LLMClient, LLMError  # noqa: E402
+from verifin.models import SIX_TUPLE_JSON_SCHEMA  # noqa: E402
+from verifin.normalize import SIX_TUPLE_FIELDS  # noqa: E402
+from verifin.span import verify_evidence  # noqa: E402
 
 #: 与 demo_core.py 一致的合成片段，保证结果可复现。
 CHUNK = """合并资产负债表（续）

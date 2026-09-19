@@ -27,8 +27,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 
-from fin_verify.compute import ZERO, pct_change, quantize_pct, safe_div
-from fin_verify.normalize import unit_scale
+from verifin.compute import ZERO, pct_change, quantize_pct, safe_div
+from verifin.normalize import unit_scale
 
 __all__ = [
     "FormulaKind",

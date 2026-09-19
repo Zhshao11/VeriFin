@@ -25,15 +25,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from fin_verify import (  # noqa: E402
+from verifin import (  # noqa: E402
     FormulaKind,
     Verdict,
     find_missing_fields,
     evaluate_formula,
     verify_evidence,
 )
-from fin_verify.llm import LLMClient, LLMError  # noqa: E402
-from fin_verify.models import EvidenceDraft, ExtractionResult  # noqa: E402
+from verifin.llm import LLMClient, LLMError  # noqa: E402
+from verifin.models import EvidenceDraft, ExtractionResult  # noqa: E402
 
 #: 合成的年报片段。结构与真实合并资产负债表一致，但数字是编造的。
 CHUNK = """合并资产负债表（续）

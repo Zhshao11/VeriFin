@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from fin_verify.tables import (
+from verifin.tables import (
     Block,
     BlockRow,
     Cell,
