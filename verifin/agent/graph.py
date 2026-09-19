@@ -11,17 +11,19 @@
 
 结构：
 
-    INTENT ──┬─→ SEARCH → EVIDENCE → VERIFY_SPAN → LOCATE → ANSWER
-             ├─→ LIST_FORMULAS → COMPUTE ─────────────────→ ANSWER
-             └─→ REFUSE（任何时刻都可直达）
+    INTENT → GUARD ─┬─→ SEARCH → EVIDENCE → VERIFY_SPAN → LOCATE → ANSWER
+                    ├─→ LIST_FORMULAS → COMPUTE ─────────────────→ ANSWER
+                    ├─→ DIFF ───────────────────────────────────→ ANSWER
+                    └─→ REFUSE（任何时刻都可直达）
 
 两条硬约束，都由**程序**执行，LLM 无法绕过：
 - 每个节点的工具**入参由图从上一步状态里填**，LLM 只挑节点名，因此它没有编数字的机会。
-- `ANSWER` 节点先查六元组是否齐全，不齐就照样转 `REFUSE`。
+- `ANSWER` 节点先查六元组是否齐全，再查**问答一致性**；任一不过就转 `REFUSE`。
 """
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +36,8 @@ if str(ROOT) not in sys.path:
 from verifin.agent.planner import Decision, LLMPlanner, policy_decide  # noqa: E402
 from verifin.agent.tools import TOOL_IMPLS, ToolRuntime  # noqa: E402
 from verifin.agent.trace import TraceStore, new_run_id  # noqa: E402
+from verifin.guards import best_label_match, label_consistency  # noqa: E402
+from verifin.scope import both_scopes_named, detect_scope_in_question  # noqa: E402
 
 TERMINALS = ("ANSWER", "REFUSE", "ABORT")
 
@@ -56,8 +60,12 @@ class NodeSpec:
 
 GRAPH: dict[str, NodeSpec] = {
     "INTENT": NodeSpec(
-        "INTENT", None, ("SEARCH", "LIST_FORMULAS", "REFUSE"),
+        "INTENT", None, ("GUARD", "REFUSE"),
         description="判断问题是查某个科目，还是要核验一条勾稽关系",
+    ),
+    "GUARD": NodeSpec(
+        "GUARD", "check_constraints", ("SEARCH", "LIST_FORMULAS", "DIFF", "REFUSE"),
+        description="主体 / 期间约束：这个问题本文档有没有资格回答",
     ),
     "SEARCH": NodeSpec(
         "SEARCH", "search_statement", ("SEARCH", "EVIDENCE", "REFUSE"),
@@ -82,6 +90,10 @@ GRAPH: dict[str, NodeSpec] = {
     "COMPUTE": NodeSpec(
         "COMPUTE", "compute", ("ANSWER", "REFUSE"),
         description="Decimal 运算核验勾稽关系",
+    ),
+    "DIFF": NodeSpec(
+        "DIFF", "diff_two_rows", ("ANSWER", "REFUSE"),
+        description="两行相减：取 A、B 两行（可跨口径）原文数值求差",
     ),
     "ANSWER": NodeSpec("ANSWER", None, (), terminal=True, description="装配六元组并判定是否可答"),
     "REFUSE": NodeSpec("REFUSE", None, (), terminal=True, description="程序级拒答"),
@@ -162,7 +174,7 @@ FORMULA_HINTS: dict[str, tuple[tuple[str, ...], int]] = {
 DEFAULT_VERIFY_FORMULA = "F1"
 
 
-def classify_intent(question: str) -> tuple[str, str | None]:
+def classify_intent(question: str, known_labels: Sequence[str] = ()) -> tuple[str, str | None]:
     """返回 (route, formula_id)。
 
     两步走，顺序不能反：
@@ -197,6 +209,12 @@ def classify_intent(question: str) -> tuple[str, str | None]:
         any(k in q for k in VERIFY_KEYWORDS) or "=" in q or "＋" in q or "+" in q
     ) or bool(distinctive)
     if not verify_signal:
+        # 核验信号没有，再看是不是「两行相减」题（"X 与 Y 的差额"）。
+        # 这一步需要已知科目名，故把 known_labels 透传进来；缺它就不判 DIFF。
+        if known_labels and re.search(r"相差|差额|之差", q):
+            operands = parse_diff_operands(q, known_labels)
+            if len(operands) == 2:
+                return "DIFF", None
         return "LOOKUP", None
 
     if met:
@@ -204,6 +222,60 @@ def classify_intent(question: str) -> tuple[str, str | None]:
         best = max(met, key=lambda fid: (hits[fid], -list(FORMULA_HINTS).index(fid)))
         return "VERIFY", best
     return "VERIFY", DEFAULT_VERIFY_FORMULA
+
+
+#: 「两行相减」题的连词切分点。
+_DIFF_SEG_RE = re.compile(r"与|及|以及|和|、|,|，")
+
+#: 仅在段内出现这些词时，才把口径判给该段 —— 否则「合并利润表」里的
+#: 「合并」会被误当成单独点名的口径（见 :func:`_segment_scope`）。
+_SCOPE_QUALIFIER_WORDS = ("口径", "报表", "本部")
+
+
+def _segment_scope(seg: str, whole_scope: str | None) -> str | None:
+    """取某一段的口径。
+
+    段内若带了「X 口径 / X 报表 / 本部」这类显式限定词，就以段内为准
+    （例如「母公司口径的资产总计」→ 母公司，「合并口径的资产总计」→ 合并）。
+    没带限定词时退回整句口径（例如「2024年合并利润表中，归母净利润」→ 合并）。
+    """
+    if any(w in seg for w in _SCOPE_QUALIFIER_WORDS):
+        return detect_scope_in_question(seg)
+    return whole_scope
+
+
+def parse_diff_operands(question: str, known_labels: Sequence[str]) -> list[dict[str, str]]:
+    """从「X 与 Y 的差额」题里析出两个操作数 `(科目名, 口径)`。
+
+    确定性解析（不调模型），规则：
+
+    1. 按连词把问句切成若干段；
+    2. 每段用 :func:`best_label_match` 取「被点名的最具体科目」，
+       并用 :func:`_segment_scope` 取该段的口径；
+    3. 去重后若恰好得两个操作数，判定为 DIFF。
+
+    为什么按段取最具体科目：问「归母净利润与净利润的差额」时，
+    「净利润」是「归母净利润」的子串，只判断"包含"会把两个操作数都判成净利润。
+    取最长就自然消解了嵌套。
+    """
+    q = question or ""
+    whole_scope = detect_scope_in_question(q)
+    operands: list[dict[str, str]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for raw in _DIFF_SEG_RE.split(q):
+        seg = raw.strip()
+        if not seg:
+            continue
+        label = best_label_match(seg, known_labels)
+        if not label:
+            continue
+        scope = _segment_scope(seg, whole_scope)
+        key = (label, scope)
+        if key in seen:
+            continue
+        seen.add(key)
+        operands.append({"label": label, "scope": scope})
+    return operands
 
 
 # --------------------------------------------------------------------------
@@ -232,7 +304,12 @@ class VeriFinAgent:
     # ---------------------------------------------------------------- 主循环
     def run(self, question: str) -> RunResult:
         run_id = new_run_id()
-        route, formula_id = classify_intent(question)
+        route, formula_id = classify_intent(question, self.runtime.known_labels)
+        operands = (
+            parse_diff_operands(question, self.runtime.known_labels)
+            if route == "DIFF"
+            else []
+        )
         if self.use_llm and self.planner is not None:
             reset = getattr(self.planner, "reset", None)
             if callable(reset):
@@ -242,6 +319,11 @@ class VeriFinAgent:
             "route": route,
             "formula_id": formula_id,
             "period": "current",
+            # 报表口径由问句确定性解析而来，随后由图填进每一个取数工具。
+            # 它决定了「同名科目取哪一张表的那一行」——不解析的话，
+            # 系统只能取"先出现的那行"，取错也不报错。
+            "scope": detect_scope_in_question(question),
+            "scope_both_named": both_scopes_named(question),
             "candidates": [],
             "tried": set(),
             "evidence": None,
@@ -249,6 +331,8 @@ class VeriFinAgent:
             "bbox": None,
             "outcome": None,
             "formulas": None,
+            "operands": operands,
+            "diff": None,
             "visited": [],
             "node": "INTENT",
             "last_result": None,
@@ -311,7 +395,7 @@ class VeriFinAgent:
                     ok=step.ok, detail=step.detail, source=step.source,
                 )
 
-            legal = spec.legal
+            legal = self._legal_for(node, state)
             decision = self._decide_next(state, legal, llm_calls)
             if decision.source == "llm":
                 llm_calls += 1
@@ -320,7 +404,8 @@ class VeriFinAgent:
             state["node"] = node
 
         result = self._finalize(run_id, question, node, state, steps,
-                                tool_calls, llm_calls, budget_exceeded, decision_source)
+                                tool_calls, llm_calls, budget_exceeded, decision_source,
+                                known_labels=self.runtime.known_labels)
         if self.trace is not None:
             self.trace.finish_run(
                 run_id,
@@ -358,28 +443,64 @@ class VeriFinAgent:
         return "ABORT"
 
     @staticmethod
+    def _legal_for(node: str, state: Mapping[str, Any]) -> tuple[str, ...]:
+        """合法后继。GUARD 的后继随意图分支 —— DIFF 意图下跳过 SEARCH 直达 DIFF。
+
+        否则 GUARD 与 LOOKUP 共用 (SEARCH, LIST_FORMULAS, REFUSE)，
+        确定性策略会沿 SEARCH → EVIDENCE 走查表路径，永远到不了 DIFF。
+        意图在 INTENT 就已确定，这里只是把"该走哪条支线"显式化。
+        """
+        if node == "GUARD" and state.get("route") == "DIFF":
+            return ("DIFF", "REFUSE")
+        if node == "GUARD":
+            # 非 DIFF 意图不让 GUARD 暴露 DIFF 后继，否则确定性策略会沿 DIFF 空跑。
+            return ("SEARCH", "LIST_FORMULAS", "REFUSE")
+        return GRAPH[node].legal
+
+    @staticmethod
     def _fill_args(node: str, state: Mapping[str, Any]) -> dict[str, Any]:
         """工具入参由图从状态里填 —— LLM 没有编参数的机会。"""
+        scope = state.get("scope")
+        if node == "GUARD":
+            return {"question": state["question"]}
         if node == "SEARCH":
             return {"query": state["question"]}
         if node == "EVIDENCE":
             label = VeriFinAgent._next_candidate(state)
-            return {"label": label or "", "period": state.get("period", "current")}
+            return {
+                "label": label or "",
+                "period": state.get("period", "current"),
+                "scope": scope,
+            }
         if node == "VERIFY_SPAN":
             ev = state.get("evidence") or {}
             return {
                 "label": ev.get("label", ""),
                 "claimed_span": ev.get("fragment", ""),
                 "claimed_value": ev.get("value", ""),
+                "scope": scope,
             }
         if node == "LOCATE":
             ev = state.get("evidence") or {}
-            return {"label": ev.get("label", ""), "value": ev.get("value", "")}
+            return {"label": ev.get("label", ""), "value": ev.get("value", ""),
+                    "scope": scope}
         if node == "LIST_FORMULAS":
             return {}
         if node == "COMPUTE":
             return {
                 "formula_id": state.get("formula_id") or "F1",
+                "period": state.get("period", "current"),
+                "scope": scope,
+            }
+        if node == "DIFF":
+            ops = state.get("operands") or []
+            a = ops[0] if len(ops) > 0 else {}
+            b = ops[1] if len(ops) > 1 else {}
+            return {
+                "label_a": a.get("label", ""),
+                "scope_a": a.get("scope"),
+                "label_b": b.get("label", ""),
+                "scope_b": b.get("scope"),
                 "period": state.get("period", "current"),
             }
         return {}
@@ -420,7 +541,9 @@ class VeriFinAgent:
 
         if not result.get("ok"):
             return
-        if node == "SEARCH":
+        if node == "GUARD":
+            state["constraints_ok"] = True
+        elif node == "SEARCH":
             state["candidates"] = list(result.get("hits") or [])
             state["per_channel"] = result.get("per_channel") or {}
             state["has_more_candidates"] = bool(state["candidates"])
@@ -433,9 +556,13 @@ class VeriFinAgent:
             state["formulas"] = list(result.get("formulas") or [])
         elif node == "COMPUTE":
             state["outcome"] = dict(result)
+        elif node == "DIFF":
+            state["diff"] = dict(result)
 
     @staticmethod
     def _summarize(tool: str, result: Mapping[str, Any], fallback: str) -> str:
+        if tool == "check_constraints":
+            return f"主体与期间约束通过（{result.get('company') or '—'}）"
         if tool == "search_statement":
             hits = result.get("hits") or []
             top = ", ".join(h.get("label", "?") for h in hits[:3])
@@ -451,6 +578,8 @@ class VeriFinAgent:
             return "、".join(f["id"] for f in (result.get("formulas") or [])[:6])
         if tool == "compute":
             return f"{result.get('verdict')} 差额 {result.get('diff')} 容差 ±{result.get('tolerance')}"
+        if tool == "diff_two_rows":
+            return f"{result.get('indicator')} = {result.get('value')} {result.get('unit')}"
         return fallback
 
     @staticmethod
@@ -464,6 +593,7 @@ class VeriFinAgent:
         llm_calls: int,
         budget_exceeded: bool,
         decision_source: str,
+        known_labels: Sequence[str] = (),
     ) -> RunResult:
         if node == "ABORT" or budget_exceeded:
             return RunResult(
@@ -497,6 +627,41 @@ class VeriFinAgent:
             return RunResult(run_id, question, "ANSWER", answer=answer, route="VERIFY",
                              steps=steps, llm_calls=llm_calls, tool_calls=tool_calls)
 
+        # DIFF 路线：两行相减，差的绝对值即答案
+        if state.get("route") == "DIFF":
+            diff = state.get("diff")
+            if not diff or not diff.get("ok"):
+                reason = VeriFinAgent._first_error_reason(steps) or "DIFF_FAILED"
+                return RunResult(
+                    run_id, question, "REFUSE",
+                    refusal={"reason": reason,
+                             "detail": "未拿到两行相减结论，不给结论。"},
+                    route="DIFF", steps=steps, llm_calls=llm_calls, tool_calls=tool_calls,
+                )
+            six = {
+                "公司": state.get("company") or "",
+                "期间": state.get("period_label") or "",
+                "指标": diff.get("indicator"),
+                "口径": diff.get("scope_label") or "跨口径",
+                "数值": diff.get("value"),
+                "单位": diff.get("unit"),
+                "来源": diff.get("source"),
+            }
+            missing_meta = [k for k in ("公司", "期间") if not six[k]]
+            if missing_meta:
+                return RunResult(
+                    run_id, question, "REFUSE",
+                    refusal={"reason": "SIX_TUPLE_INCOMPLETE",
+                             "detail": f"六元组缺：{'、'.join(missing_meta)}（封面解析未接入）。"},
+                    route="DIFF", steps=steps, llm_calls=llm_calls, tool_calls=tool_calls,
+                )
+            return RunResult(
+                run_id, question, "ANSWER",
+                answer={"six_tuple": six, "operands": diff.get("operands"),
+                        "route": "DIFF"},
+                route="DIFF", steps=steps, llm_calls=llm_calls, tool_calls=tool_calls,
+            )
+
         # LOOKUP 路线：六元组齐全才给答案，缺一项就拒答
         ev = state.get("evidence") or {}
         span_state = state.get("span") or {}
@@ -527,10 +692,27 @@ class VeriFinAgent:
                 route="LOOKUP", steps=steps, llm_calls=llm_calls, tool_calls=tool_calls,
             )
 
+        # **问答一致性**：先确认"取到的这一行就是问句问的那一行"，再装配答案。
+        #
+        # 这道检查位置很关键 —— 它必须在这五个字段都齐、span 也通过**之后**再跑，
+        # 因为要拦的正是"证据全都合格、但答的是另一个科目"这一类。
+        # 实测反例：问「现金及现金等价物净增加额」，返回「投资活动现金流入小计」，
+        # 数值真实、页码正确、span 通过 —— 上面所有关卡都会放行。
+        consistent, why = label_consistency(
+            question, str(ev.get("label") or ""), known_labels
+        )
+        if not consistent:
+            return RunResult(
+                run_id, question, "REFUSE",
+                refusal={"reason": "LABEL_MISMATCH", "detail": why},
+                route="LOOKUP", steps=steps, llm_calls=llm_calls, tool_calls=tool_calls,
+            )
+
         six = {
             "公司": state.get("company") or "",
             "期间": state.get("period_label") or "",
             "指标": ev.get("label"),
+            "口径": ev.get("scope") or state.get("scope") or "未标注",
             "数值": ev.get("value"),
             "单位": ev.get("unit"),
             "来源": f"第 {ev.get('page')} 页"

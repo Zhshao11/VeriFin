@@ -180,12 +180,20 @@ class Chunk:
     section: str | None
     values: tuple[str, ...]
     text: str
+    scope: str | None = None
+    """所在报表的口径：`"合并"` / `"母公司"` / `None`（未标注，**不猜**）。
+
+    中文年报里同名科目在两个口径下各有一行，取值完全不同但都是真数字。
+    没有这个字段，检索只能靠"谁先出现"来决定取哪一行 ——
+    取错也不报错，只是安静地给出另一张表的数值。
+    """
 
     def to_row(self) -> tuple:
         return (
             self.chunk_id, self.doc_id, self.table_index, self.page,
             self.label, self.section, json.dumps(list(self.values),
                                                  ensure_ascii=False), self.text,
+            self.scope,
         )
 
 
@@ -380,6 +388,7 @@ def build_chunks(tables: Iterable["object"], doc_id: str) -> list[Chunk]:
                     section=section,
                     values=values,
                     text=" | ".join(p for p in text_parts if p).strip(),
+                    scope=getattr(table, "scope", None),
                 )
             )
     return chunks
@@ -394,7 +403,8 @@ CREATE TABLE IF NOT EXISTS chunks(
     label        TEXT NOT NULL,
     section      TEXT,
     values_json  TEXT NOT NULL,
-    text         TEXT NOT NULL
+    text         TEXT NOT NULL,
+    scope        TEXT
 );
 CREATE TABLE IF NOT EXISTS numbers(
     chunk_id         TEXT NOT NULL,
@@ -429,7 +439,7 @@ def create_index(
 
     # 1) 主表
     con.executemany(
-        "INSERT INTO chunks VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO chunks VALUES (?,?,?,?,?,?,?,?,?)",
         [c.to_row() for c in chunks],
     )
 
@@ -544,7 +554,7 @@ class RetrievalIndex:
             chunk_id=r["chunk_id"], doc_id=r["doc_id"],
             table_index=r["table_index"], page=r["page"], label=r["label"],
             section=r["section"], values=tuple(json.loads(r["values_json"])),
-            text=r["text"],
+            text=r["text"], scope=r["scope"],
         )
 
     # ---- 通道 A：词法 ----

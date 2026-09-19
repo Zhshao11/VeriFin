@@ -81,6 +81,10 @@ class ItemResult:
     tool_calls: int = 0
     steps: int = 0
     run_id: str = ""
+    latency_ms: float = 0.0
+    """端到端耗时（毫秒），含检索 / 校验 / 坐标全部动作。"""
+    evidence_recalled: bool = False
+    """检索层是否真的召回了候选证据（SEARCH 命中非空 / DIFF 取数成功）。"""
 
     @property
     def degraded(self) -> bool:
@@ -107,6 +111,8 @@ class ItemResult:
             "tool_calls": self.tool_calls,
             "steps": self.steps,
             "run_id": self.run_id,
+            "latency_ms": round(self.latency_ms, 1),
+            "evidence_recalled": self.evidence_recalled,
         }
 
 
@@ -254,6 +260,15 @@ def _pages_of(result: RunResult, got_value: str | None) -> tuple[int, ...]:
                 pages.add(page)
         return tuple(sorted(pages))
 
+    if result.route == "DIFF":
+        # 两行可能不在同一页，取证据所在页的并集（取数与溯源是两回事）。
+        pages: set[int] = set()
+        for op in (answer.get("operands") or []):
+            page = (op or {}).get("页码")
+            if isinstance(page, int) and page > 0:
+                pages.add(page)
+        return tuple(sorted(pages))
+
     source = ((answer.get("six_tuple") or {}).get("来源") or "")
     digits = ""
     out: list[int] = []
@@ -307,6 +322,17 @@ class EvalReport:
         all_steps = sum(r.steps for r in self.results)
         degraded = [r for r in self.results if r.degraded]
 
+        latencies = sorted(r.latency_ms for r in self.results)
+        recalled_answerable = [
+            r for r in answerable if r.evidence_recalled
+        ]
+
+        def _pctl(xs: list[float], p: float) -> float:
+            if not xs:
+                return 0.0
+            k = max(0, min(len(xs) - 1, int(round((len(xs) - 1) * p))))
+            return round(xs[k], 1)
+
         return {
             "调度器": self.planner,
             "总题数": total,
@@ -325,6 +351,12 @@ class EvalReport:
             "总步数": all_steps,
             "LLM 步占比": round(llm_steps / all_steps, 4) if all_steps else 0.0,
             "含兜底步的运行数": len(degraded),
+            "端到端耗时P50_ms": _pctl(latencies, 0.50),
+            "端到端耗时P95_ms": _pctl(latencies, 0.95),
+            "证据召回率": (
+                f"{len(recalled_answerable)}/{len(answerable)}"
+                if answerable else "—"
+            ),
         }
 
     def render(self, *, show_all: bool = False) -> str:
@@ -360,6 +392,8 @@ class EvalReport:
             "失败分类：" + ("；".join(f"{k} {v}" for k, v in s["失败分类"].items()) or "（无）"),
             f"LLM 步 {s['LLM 步数']}/{s['总步数']}（{s['LLM 步占比']:.1%}）"
             f"，含兜底步的运行 {s['含兜底步的运行数']} 次",
+            f"端到端耗时 P50/P95：{s['端到端耗时P50_ms']} / {s['端到端耗时P95_ms']} ms",
+            f"证据召回率：{s['证据召回率']}",
         ]
         return "\n".join(lines)
 
@@ -403,7 +437,21 @@ def run_bank(
     )
     report = EvalReport(planner=planner)
     for item in items:
-        report.results.append(compare(item, agent.run(item.question)))
+        import time
+
+        t0 = time.perf_counter()
+        result = agent.run(item.question)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        r = compare(item, result)
+        r.latency_ms = dt_ms
+        r.evidence_recalled = any(
+            s.ok and s.node in (
+                "SEARCH", "EVIDENCE", "VERIFY_SPAN", "LOCATE",
+                "DIFF", "COMPUTE", "LIST_FORMULAS",
+            )
+            for s in result.steps
+        )
+        report.results.append(r)
     return report
 
 

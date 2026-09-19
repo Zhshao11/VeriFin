@@ -65,8 +65,10 @@ def policy_decide(state: Mapping[str, Any], legal: Sequence[str]) -> Decision:
     """
     route = state.get("route")
     order = ("LIST_FORMULAS", "COMPUTE", "ANSWER") if route == "VERIFY" else (
-        "SEARCH", "EVIDENCE", "VERIFY_SPAN", "LOCATE", "ANSWER",
+        "DIFF", "SEARCH", "EVIDENCE", "VERIFY_SPAN", "LOCATE", "ANSWER",
     )
+    # GUARD 永远排在流程最前面：主体 / 期间约束不过，后面做什么都是错的。
+    order = ("GUARD", *order)
     visited = set(state.get("visited") or ())
 
     fatal = (

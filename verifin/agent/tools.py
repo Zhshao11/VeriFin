@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 
 from verifin import span as span_mod  # noqa: E402
 from verifin.formulas import FORMULA_REGISTRY, evaluate_formula  # noqa: E402
+from verifin.guards import DocConstraints, check_question_constraints  # noqa: E402
 
 DISCLOSURE_UNITS = ("元", "千元", "万元", "百万元", "亿元")
 
@@ -56,6 +57,18 @@ def tool_specs() -> list[ToolSpec]:
 
 
 _SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        name="check_constraints",
+        description="在检索前核对问句点名的主体与期间是否属于本文档。不属于则拒答，不做后续召回。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "用户原问句"}
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+    ),
     ToolSpec(
         name="search_statement",
         description="在年报里检索科目，返回候选行（科目名、页码、数值、命中了哪几路召回收）。只做检索，不做判断。",
@@ -133,6 +146,27 @@ _SPECS: tuple[ToolSpec, ...] = (
             "additionalProperties": False,
         },
     ),
+    ToolSpec(
+        name="diff_two_rows",
+        description=(
+            "两行相减：取 A、B 两行（可跨口径）的原文数值，用 Decimal 求差的绝对差。"
+            "覆盖「X 与 Y 的差额是多少」这类综合题。数值只来自原文，不接受外部金额。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "label_a": {"type": "string", "description": "第一个科目名"},
+                "scope_a": {"type": "string", "enum": ["合并", "母公司", None],
+                            "description": "第一个科目的口径"},
+                "label_b": {"type": "string", "description": "第二个科目名"},
+                "scope_b": {"type": "string", "enum": ["合并", "母公司", None],
+                            "description": "第二个科目的口径"},
+                "period": {"type": "string", "enum": ["current", "prior"]},
+            },
+            "required": ["label_a", "label_b"],
+            "additionalProperties": False,
+        },
+    ),
 )
 
 
@@ -151,7 +185,15 @@ class ToolRuntime:
     """
 
     by_label: Mapping[str, Any] = field(default_factory=dict)
-    """科目名 → chunk（具备 .label / .values / .page / .text）。"""
+    """科目名 → chunk（具备 .label / .values / .page / .text）。
+
+    同一科目名在合并与母公司两套报表里各有一行，这里是**主口径**那一行：
+    优先 `合并`，其次未标注口径，最后 `母公司`。
+    只用于「问句没点名口径且该科目只有一个口径」的情形；
+    要按口径精确取数请用 :meth:`chunk_for`。
+    """
+    by_label_scope: Mapping[tuple[str, str | None], Any] = field(default_factory=dict)
+    """`(科目名, 口径)` → chunk。口径消歧的落点：同名科目两套报表都在这里。"""
     index: Any = None
     """检索索引（RetrievalIndex）；为 None 时 `search_statement` 走离线降级路径。"""
     unit: str = "元"
@@ -160,15 +202,75 @@ class ToolRuntime:
     pdf_open: Callable[[], Any] | None = None
     """返回 `verifin.geometry.PdfGeometry` 的可调用对象（支持 with 协议）。"""
     index_lock: Any = None
+    company_aliases: tuple[str, ...] = ()
+    """本文档主体的别名（发行人简称等）。用于**主体约束**：问句点名了别家主体就拒答。"""
+    report_years: tuple[int, ...] = ()
+    """本文档财务报表覆盖的年份（由表头日期推导）。用于**期间约束**。"""
+    constraints: DocConstraints | None = None
+    """主体 / 期间约束的整体。给了它就以它为准（上面的两个字段只在没给时兜底）。"""
 
-    def resolve(self, name: str) -> str | None:
-        """把公式规范科目名对齐到报表实际行名。"""
-        if name in self.by_label:
-            return name
-        alias = LABEL_ALIAS.get(name)
-        if alias and alias in self.by_label:
-            return alias
+    #: 内部缓存：全部已知科目名（含各口径）。`known_labels` 用。
+    _labels_cache: tuple[str, ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    @property
+    def known_labels(self) -> tuple[str, ...]:
+        """报表里出现过的**全部**科目名（含合并与母公司两份）。
+
+        问答一致性护栏要在它上面做「问句点名了哪个科目」的匹配，
+        所以必须包含所有口径 —— 漏掉母公司那套，会使得
+        「母公司资产总计是多少」被判成"没点名任何科目"而误拒。
+        """
+        if self._labels_cache is None:
+            names = {label for (label, _scope) in self.by_label_scope}
+            names |= set(self.by_label)
+            self._labels_cache = tuple(sorted(names))
+        return self._labels_cache
+
+    def effective_constraints(self) -> DocConstraints:
+        """取约束：优先用显式传入的 `constraints`，否则用零散字段拼一个。"""
+        if self.constraints is not None:
+            return self.constraints
+        return DocConstraints(
+            company=self.company,
+            company_aliases=tuple(self.company_aliases),
+            report_years=tuple(self.report_years),
+        )
+
+    def resolve(self, name: str, scope: str | None = None) -> str | None:
+        """把公式规范科目名对齐到报表实际行名。
+
+        `scope` 给定时只认该口径下的行 —— 这正是口径消歧的关键：
+        「资产总计」在两套报表里都有，不指定口径就等于没指定取哪一张表。
+        """
+        for candidate in (name, LABEL_ALIAS.get(name)):
+            if not candidate:
+                continue
+            if scope is None:
+                if candidate in self.by_label:
+                    return candidate
+            elif (candidate, scope) in self.by_label_scope:
+                return candidate
         return None
+
+    def scopes_for(self, label: str) -> tuple[str | None, ...]:
+        """该科目在哪些口径下存在（已排序，便于确定性输出）。
+
+        返回 `("合并", "母公司")` 表示两套报表都有 → 问句不点名口径时必须拒答，
+        而不是"用先出现的那一行"含糊过去。
+        """
+        found = {s for (lbl, s) in self.by_label_scope if lbl == label}
+        if not found and label in self.by_label:
+            # 兼容只塞了 by_label 的极简运行时（测试用）
+            found = {None}
+        return tuple(sorted(found, key=lambda s: (s is None, s or "")))
+
+    def chunk_for(self, label: str, scope: str | None = None) -> Any | None:
+        """按口径取 chunk。`scope=None` 时退回主口径那一行。"""
+        if scope is None:
+            return self.by_label.get(label)
+        return self.by_label_scope.get((label, scope))
 
 
 def _fail(code: str, detail: str, **extra: Any) -> dict[str, Any]:
@@ -216,6 +318,21 @@ def _fragment(chunk_text: str, raw_value: str, lead: int = 40) -> str:
 # --------------------------------------------------------------------------
 
 
+def check_constraints(rt: ToolRuntime, *, question: str) -> dict[str, Any]:
+    """工具 0：主体 / 期间约束。
+
+    在**检索之前**跑，因为它要回答的是「这个问题本文档有没有资格回答」——
+    没资格的话，后面召回得再准也是错的（问宁德时代却拿茅台的值来答，
+    数值是真的、页码是真的，但答的是另一家公司）。
+
+    这是纯程序判断，与模型无关，也不看问句的措辞风格。
+    """
+    violation = check_question_constraints(question, rt.effective_constraints())
+    if violation is not None:
+        return _fail(violation["error"], violation["detail"])
+    return _ok(checked=True, company=rt.company, report_years=list(rt.report_years))
+
+
 def search_statement(rt: ToolRuntime, *, query: str, top_k: int = 5) -> dict[str, Any]:
     """工具 1：科目检索（委托给检索层，工具本身不排序不筛选）。"""
     from verifin.retrieval import RetrievalIndex  # 局部导入：避免循环依赖
@@ -249,6 +366,7 @@ def search_statement(rt: ToolRuntime, *, query: str, top_k: int = 5) -> dict[str
             "label": h.chunk.label,
             "page": h.chunk.page,
             "value": h.chunk.values[0] if h.chunk.values else None,
+            "scope": getattr(h.chunk, "scope", None),
             "via": list(h.via),
             "score": round(h.score, 6),
         }
@@ -257,17 +375,80 @@ def search_statement(rt: ToolRuntime, *, query: str, top_k: int = 5) -> dict[str
     return _ok(hits=hits, per_channel=dict(result.per_channel))
 
 
+def _resolve_scoped(
+    rt: ToolRuntime, label: str, scope: str | None
+) -> tuple[str | None, dict[str, Any] | None]:
+    """把科目名对齐到某个口径下的报表行。
+
+    Returns:
+        `(报表行名, 失败返回值)` —— 成功时第二个元素为 `None`。
+        把「口径消歧」这一步单独抽出来，是因为取行证据与勾稽取数**必须用同一套规则**：
+        两处各写一遍，迟早出现「证据取自母公司、勾稽取自合并」这种更隐蔽的错配。
+
+    三种失败要分清，它们指向完全不同的修法：
+
+    | 错误码 | 含义 |
+    |---|---|
+    | `LABEL_NOT_FOUND` | 报表里根本没有这个科目名 |
+    | `AMBIGUOUS_SCOPE` | 科目在两套报表里都有，但问句没说取哪一套 → **必须拒答** |
+    | `SCOPE_NOT_AVAILABLE` | 问句点了口径，但该科目不在这个口径下 |
+    """
+    # 先判口径歧义：**问句没点名口径**，但同名科目在多套报表里都有
+    # （合并 / 母公司数值不同）→ 必须拒答，不能"用先出现的那一行"含糊过去。
+    # 这一步必须在 `resolve(label, None)` 之前，否则主口径兜底会把歧义吞掉，
+    # 「资产总计是多少」就会被错误地答成合并值。
+    if scope is None:
+        scopes = rt.scopes_for(label)
+        named = tuple(s for s in scopes if s is not None)
+        if len(named) > 1:
+            return None, _fail(
+                "AMBIGUOUS_SCOPE",
+                f"「{label}」在 {'、'.join(named)} 两套报表里都有，数值不同；"
+                "问句未限定口径 → 拒答（不替用户挑一个）",
+                requested_label=label,
+                scopes=list(named),
+            )
+
+    actual = rt.resolve(label, scope)
+    if actual is not None:
+        return actual, None
+
+    # 没解析出来：分清是"名称不存在"还是"口径对不上"。
+    alias = rt.resolve(label)
+    probe = alias or label
+    scopes = rt.scopes_for(probe)
+    named = tuple(s for s in scopes if s is not None)
+
+    if scope is not None and scopes:
+        available = "、".join(str(s) for s in scopes) or "未标注口径"
+        return None, _fail(
+            "SCOPE_NOT_AVAILABLE",
+            f"「{probe}」不在{scope}口径下（该科目只出现在：{available}）",
+            requested_label=label,
+        )
+    return None, _fail(
+        "LABEL_NOT_FOUND", f"报表里没有科目「{label}」", requested_label=label
+    )
+
+
 def get_row_evidence(
-    rt: ToolRuntime, *, label: str, period: str = "current"
+    rt: ToolRuntime, *, label: str, period: str = "current", scope: str | None = None
 ) -> dict[str, Any]:
-    """工具 2：取整行证据。数值只能来自原文。"""
+    """工具 2：取整行证据。数值只能来自原文。
+
+    `scope` 由问句解析而来。**同名科目在两套报表里数值不同**，
+    所以取数前必须先过一遍口径消歧（见 :func:`_resolve_scoped`）。
+    """
     column = 0 if period == "current" else 1
-    actual = rt.resolve(label)
-    if actual is None:
+    actual, failure = _resolve_scoped(rt, label, scope)
+    if failure is not None:
+        return failure
+    assert actual is not None
+    chunk = rt.chunk_for(actual, scope)
+    if chunk is None:
         return _fail(
             "LABEL_NOT_FOUND", f"报表里没有科目「{label}」", requested_label=label
         )
-    chunk = rt.by_label[actual]
     if len(chunk.values) <= column:
         return _fail(
             "COLUMN_MISSING",
@@ -289,20 +470,26 @@ def get_row_evidence(
         decimal=str(value),
         unit=rt.unit,
         page=chunk.page,
+        scope=getattr(chunk, "scope", None),
         fragment=_fragment(chunk.text, raw),
         chunk_text=chunk.text,
     )
 
 
-def locate_in_pdf(rt: ToolRuntime, *, label: str, value: str) -> dict[str, Any]:
+def locate_in_pdf(
+    rt: ToolRuntime, *, label: str, value: str, scope: str | None = None
+) -> dict[str, Any]:
     """工具 3：坐标定位 + 同行校验。"""
-    actual = rt.resolve(label)
-    if actual is None:
-        return _fail("LABEL_NOT_FOUND", f"报表里没有科目「{label}」")
+    actual, failure = _resolve_scoped(rt, label, scope)
+    if failure is not None:
+        return failure
+    assert actual is not None
     if rt.pdf_open is None:
         return _fail("NO_PDF", "未挂载 PDF，无法做坐标定位")
 
-    chunk = rt.by_label[actual]
+    chunk = rt.chunk_for(actual, scope)
+    if chunk is None:
+        return _fail("LABEL_NOT_FOUND", f"报表里没有科目「{label}」")
     with rt.pdf_open() as geo:
         loc = geo.locate_row(chunk.page, actual, value)
         if not loc.same_row_verified or loc.row_box is None:
@@ -319,17 +506,21 @@ def locate_in_pdf(rt: ToolRuntime, *, label: str, value: str) -> dict[str, Any]:
 
 
 def verify_span(
-    rt: ToolRuntime, *, label: str, claimed_span: str, claimed_value: str
+    rt: ToolRuntime, *, label: str, claimed_span: str, claimed_value: str,
+    scope: str | None = None,
 ) -> dict[str, Any]:
     """工具 4：span 硬校验（两层关卡）。"""
-    actual = rt.resolve(label)
-    if actual is None:
-        return _fail("LABEL_NOT_FOUND", f"报表里没有科目「{label}」")
+    actual, failure = _resolve_scoped(rt, label, scope)
+    if failure is not None:
+        return failure
+    assert actual is not None
     value = _to_decimal(claimed_value)
     if value is None:
         return _fail("VALUE_UNPARSED", f"声称的数值无法解析：{claimed_value!r}")
 
-    chunk = rt.by_label[actual]
+    chunk = rt.chunk_for(actual, scope)
+    if chunk is None:
+        return _fail("LABEL_NOT_FOUND", f"报表里没有科目「{label}」")
     verdict = span_mod.verify_evidence(
         claimed_span=claimed_span,
         chunk_text=chunk.text,
@@ -364,8 +555,16 @@ def list_formulas(rt: ToolRuntime, *, kind: str | None = None) -> dict[str, Any]
     return _ok(formulas=items)
 
 
-def compute(rt: ToolRuntime, *, formula_id: str, period: str = "current") -> dict[str, Any]:
-    """工具 6：勾稽核验。取数与运算都在工具内部，LLM 不碰算术。"""
+def compute(
+    rt: ToolRuntime, *, formula_id: str, period: str = "current",
+    scope: str | None = None,
+) -> dict[str, Any]:
+    """工具 6：勾稽核验。取数与运算都在工具内部，LLM 不碰算术。
+
+    `scope` 一定要传：**同一恒等式在合并与母公司两套报表下都能平衡**
+    （差额都是 0.00）。不限定口径就取数，等于让"取到真数、答错报表"
+    也能得到 PASS —— 那是本项目最想防的错误。
+    """
     if formula_id not in FORMULA_REGISTRY:
         return _fail("FORMULA_NOT_FOUND", f"注册表里没有公式 {formula_id!r}")
     formula = FORMULA_REGISTRY[formula_id]
@@ -377,8 +576,16 @@ def compute(rt: ToolRuntime, *, formula_id: str, period: str = "current") -> dic
     # 用 required_operands 而不是 operand_names：后者含左值，
     # 对派生量公式（F4 毛利率）会去报表里找「毛利率」这一行，永远找不到。
     for name in formula.required_operands:
-        actual = rt.resolve(name)
-        chunk = rt.by_label.get(actual) if actual else None
+        actual, failure = _resolve_scoped(rt, name, scope)
+        if failure is not None:
+            # 口径歧义/不存在要如实上报，不能记成"缺操作数" ——
+            # 后者会把「没说清取哪张表」误导成「报表里没这个科目」。
+            if failure.get("error") in ("AMBIGUOUS_SCOPE", "SCOPE_NOT_AVAILABLE"):
+                return failure
+            missing.append(name)
+            continue
+        assert actual is not None
+        chunk = rt.chunk_for(actual, scope)
         if chunk is None or len(chunk.values) <= column:
             missing.append(name)
             continue
@@ -388,7 +595,15 @@ def compute(rt: ToolRuntime, *, formula_id: str, period: str = "current") -> dic
             missing.append(name)
             continue
         operands[name] = val
-        sources.append({"科目": name, "报表行名": actual, "值": raw, "页码": chunk.page})
+        sources.append(
+            {
+                "科目": name,
+                "报表行名": actual,
+                "口径": getattr(chunk, "scope", None),
+                "值": raw,
+                "页码": chunk.page,
+            }
+        )
 
     if missing:
         return _fail(
@@ -411,14 +626,68 @@ def compute(rt: ToolRuntime, *, formula_id: str, period: str = "current") -> dic
     )
 
 
+def _scope_suffix(scope: str | None) -> str:
+    """口径后缀：画进「指标」字段里，让人一眼看出取的是哪张表。"""
+    return f"（{scope}）" if scope else ""
+
+
+def diff_two_rows(
+    rt: ToolRuntime, *, label_a: str, scope_a: str | None,
+    label_b: str, scope_b: str | None, period: str = "current",
+) -> dict[str, Any]:
+    """两行相减：取 A、B 两行（可跨口径）的原文数值，用 Decimal 精确求差。
+
+    这是 D5 新增的「综合判断」动作，覆盖题库里「X 与 Y 的差额是多少」这一类
+    —— 它们既不能归为单值抽取（要取两行），也不能用恒等式核验（没有等号）。
+
+    红线不变：数值只来自原文行（`get_row_evidence`），差只走 Decimal，
+    工具不接受任何外部传入的金额。返回的「指标」同时标出两套口径，
+    同源头的「口径歧义必须拒答」形成对照 —— 这里问句**主动点名了两套口径**，
+    所以不是歧义，是要算两者的差。
+    """
+    ea = get_row_evidence(rt, label=label_a, period=period, scope=scope_a)
+    if not ea.get("ok"):
+        return ea
+    eb = get_row_evidence(rt, label=label_b, period=period, scope=scope_b)
+    if not eb.get("ok"):
+        return eb
+    va = _to_decimal(ea["value"])
+    vb = _to_decimal(eb["value"])
+    if va is None or vb is None:
+        return _fail("NON_NUMERIC", "任一操作数无法解析为数字")
+    diff = abs(va - vb)
+    indicator = (
+        f"{ea['label']}{_scope_suffix(ea.get('scope'))}"
+        f" − {eb['label']}{_scope_suffix(eb.get('scope'))}"
+    )
+    return _ok(
+        ok=True,
+        indicator=indicator,
+        value=str(diff),
+        decimal=str(diff),
+        unit=rt.unit,
+        operands=[
+            {"科目": ea["label"], "口径": ea.get("scope"), "值": ea["value"],
+             "页码": ea["page"], "片段": ea.get("fragment", "")},
+            {"科目": eb["label"], "口径": eb.get("scope"), "值": eb["value"],
+             "页码": eb["page"], "片段": eb.get("fragment", "")},
+        ],
+        pages=[ea["page"], eb["page"]],
+        source=f"第 {ea['page']} 页 · 第 {eb['page']} 页",
+        scope_label="跨口径" if scope_a != scope_b else (scope_a or "未标注"),
+    )
+
+
 #: 名字 → 实现。图的 EXECUTE 节点按这个名字分发。
 TOOL_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
+    "check_constraints": check_constraints,
     "search_statement": search_statement,
     "get_row_evidence": get_row_evidence,
     "locate_in_pdf": locate_in_pdf,
     "verify_span": verify_span,
     "list_formulas": list_formulas,
     "compute": compute,
+    "diff_two_rows": diff_two_rows,
 }
 
 #: 每个工具默认算几次预算。用于成本核算与预算控制。

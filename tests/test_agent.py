@@ -407,7 +407,7 @@ class ProgressLLM:
     """
 
     PRIORITY = (
-        "INTENT", "SEARCH", "LIST_FORMULAS", "EVIDENCE", "COMPUTE",
+        "INTENT", "GUARD", "SEARCH", "LIST_FORMULAS", "EVIDENCE", "COMPUTE",
         "VERIFY_SPAN", "LOCATE", "ANSWER", "REFUSE",
     )
 

@@ -30,10 +30,11 @@ MinerU 的 markdown 产物是**按页**组织的：一页一个 `<!-- page N of 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .normalize import normalize_text
+from .scope import derive_scope_from_caption
 
 __all__ = [
     "Cell",
@@ -65,6 +66,13 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 #: 表头里的日期样式，如 `2024年12月31日` / `2024-12-31`。
 _DATE_RE = re.compile(r"\d{4}\s*[年\-/]\s*\d{1,2}\s*[月\-/]\s*\d{1,2}")
+
+#: 表标题（markdown 标题行），形如 `## 母公司资产负债表`。
+_HEADING_RE = re.compile(r"^[ \t]*#{1,6}[ \t]*(.+?)[ \t]*$", re.M)
+
+#: 单独的年份，用于从表头推导报表覆盖年份。
+#: 用非捕获组：带捕获组会让 `findall` 只返回组内容（"20"）而不是整年（"2024"）。
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 
 #: 金额单元格。要求有位分隔符、或两位小数、或至少 5 位连续数字——
 #: 这样能把「附注」列的 `1` / `39` 这种小整数排除掉。
@@ -148,6 +156,13 @@ class Block:
     page: int
     serialization: str
     rows: tuple[BlockRow, ...]
+    caption: str | None = None
+    """该块**最近的上级标题**，形如 `合并资产负债表`。
+
+    它是判断这张表属于合并口径还是母公司口径的**唯一依据**：
+    报表正文里同一科目名会出现两次（两个口径各一行），只有标题能区分。
+    MinerU 把标题输出成独立的一行 markdown 标题，故可在切块时顺手捕获。
+    """
 
     @property
     def width(self) -> int:
@@ -201,6 +216,26 @@ class LogicalTable:
     pages: list[int] = field(default_factory=list)
     #: 是否因列数不一致等原因**未**续接上一张表，需要人工看一眼。
     flags: list[str] = field(default_factory=list)
+    #: 表标题（取首页块的 caption），形如 `合并资产负债表`。
+    caption: str | None = None
+    #: 报表口径：`"合并"` / `"母公司"` / `None`（标题推不出来，**不猜**）。
+    #: 同名科目在合并与母公司两套表里各有一行，没有这个字段就只能取"先出现的那行"。
+    scope: str | None = None
+
+    @property
+    def report_years(self) -> tuple[int, ...]:
+        """从表头的日期列推导出本表覆盖的年份（如 `(2023, 2024)`）。
+
+        用途是**期间约束**：问句若点名了报表覆盖年份之外的年份，
+        证据在物理上就不可能存在，必须拒答而不是召回一个邻近年份的数字。
+        从表头推导而不是从配置读，是因为它本来就写在报表上。
+        """
+        if not self.header:
+            return ()
+        years: list[int] = []
+        for cell in self.header:
+            years.extend(int(y) for y in _YEAR_RE.findall(cell or ""))
+        return tuple(sorted(set(years)))
 
     @property
     def width(self) -> int:
@@ -323,9 +358,17 @@ def parse_blocks(text: str) -> tuple[int, list[Block]]:
     Returns:
         `(总页数, 按文档顺序排列的 Block 列表)`。
         同一页内若既有 HTML 表又有 markdown 表，按出现位置先后排列。
+
+    Note:
+        每个块会带上它**最近的上级标题**（`caption`）—— 表标题是判断
+        「这张表是合并口径还是母公司口径」的唯一依据。标题在整个文档里是累积的
+        （合并资产负债表从 p58 起，续页 p59/p60 页面上没有标题），
+        所以标题必须**跨页延续**，否则续页块会丢掉口径。
     """
     total_pages = 0
     blocks: list[Block] = []
+    #: 最近的上级标题。**跨页延续**：续页页面上没有标题，但它仍属于上一张表。
+    caption: str | None = None
     parts = PAGE_MARKER_RE.split(text)
     # split 结果形如：[前言, 页码, 总页数, 正文, 页码, 总页数, 正文, ...]
     for i in range(1, len(parts), 3):
@@ -341,9 +384,15 @@ def parse_blocks(text: str) -> tuple[int, list[Block]]:
             positioned.append(
                 (m.start(), _parse_markdown_table(m.group(0).splitlines(), page))
             )
-        for _, block in sorted(positioned, key=lambda kv: kv[0]):
+        # 标题与表格一起按位置排序，才能知道「这个表前面最近的标题是哪个」。
+        headings = [(m.start(), m.group(1).strip()) for m in _HEADING_RE.finditer(body)]
+        for pos, block in sorted(positioned, key=lambda kv: kv[0]):
+            # 只吸收**位置在表格之前**的标题。
+            before = [h for h in headings if h[0] < pos]
+            if before:
+                caption = before[-1][1]
             if block.rows:
-                blocks.append(block)
+                blocks.append(replace(block, caption=caption))
     return total_pages, blocks
 
 
@@ -397,6 +446,7 @@ def stitch(blocks: list[Block], total_pages: int = 0) -> StitchReport:
                     page_end=block.page,
                     serializations={block.serialization},
                     pages=[block.page],
+                    caption=block.caption,
                 )
             )
             body = block.rows[1:]
@@ -428,6 +478,7 @@ def stitch(blocks: list[Block], total_pages: int = 0) -> StitchReport:
                         serializations={block.serialization},
                         pages=[block.page],
                         flags=[reason],
+                        caption=block.caption,
                     )
                 )
                 body = block.rows
@@ -451,6 +502,12 @@ def stitch(blocks: list[Block], total_pages: int = 0) -> StitchReport:
                     from_continuation=continuation,
                 )
             )
+
+    # 口径由表标题推导。推不出来就是 None（**不猜成"合并"**）：
+    # 把不确定悄悄变成确定，比留下一个 None 危险得多 —— 前者会让
+    # 「这张表口径未知」被下游当成「这是合并表」，于是取错口径也无人察觉。
+    for table in tables:
+        table.scope = derive_scope_from_caption(table.caption)
 
     return StitchReport(total_pages=total_pages, blocks=blocks, tables=tables)
 
