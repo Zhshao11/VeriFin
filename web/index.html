@@ -143,6 +143,26 @@ img.evidence{width:100%;border:1px solid var(--line);border-radius:8px;margin-to
     <div id="identityBox"><p class="empty">尚未运行。</p></div>
   </section>
 
+  <!-- ⑥ Agent 编排 -->
+  <section>
+    <h2><span class="n">06</span> Agent 编排：调度器在图里选下一步</h2>
+    <p class="foot" style="margin-top:0">
+      上面几块跑的是固定链路。这里是真正的编排层：每步走哪个节点，由图的可达后继集合决定，
+      调度器（LLM 或确定性策略）在其中挑一个。工具入参由**图**从状态里填，调度器只挑节点名，
+      所以它没有编数字的机会。六元组不全时，即使调度器选 ANSWER，程序照样拒答。
+    </p>
+    <div style="margin:12px 0;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="ghost" onclick="agentRun('policy')">用确定性策略跑（离线可跑）</button>
+      <button class="ghost" onclick="agentRun('llm')">用 LLM 调度跑（需端点可用）</button>
+      <button class="ghost" onclick="agentRuns()">看最近运行记录</button>
+    </div>
+    <div id="agentBox"><p class="empty">尚未运行。问题取上方输入框的内容。</p></div>
+    <details style="margin-top:12px">
+      <summary class="foot" style="cursor:pointer">显式图结构（节点 → 合法后继）</summary>
+      <pre id="graphText" style="font-size:12.5px;overflow:auto;background:#f3f6f8;padding:10px;border-radius:6px"></pre>
+    </details>
+  </section>
+
   <p class="foot">
     已知限制：公司名与期间目前来自演示配置（封面结构化解析待接入）；向量通道走本地 TF-IDF（端点无 embedding 能力）；
     坐标层依赖 PDF 内嵌文本层，扫描版 PDF 需先接 OCR。
@@ -179,6 +199,8 @@ async function meta(){
   const r = await fetch('/api/meta'); const m = await r.json();
   document.getElementById('metaBox').textContent =
     `${m.company} · ${m.period} · 披露单位 ${m.disclosure_unit} · ${m.chunk_count} chunks / ${m.table_count} 表 · 向量 ${m.embedder}`;
+  const g = document.getElementById('graphText');
+  if(g) g.textContent = m.agent_graph || '';
 }
 
 function stageHtml(trace){
@@ -297,6 +319,73 @@ async function identity(period){
     <table>${d.sources.map(s=>`<tr><th>${esc(s['科目'])}</th>
       <td class="v">${esc(s['值'])}<div class="foot">报表行名 ${esc(s['报表行名']||'—')} · p${s['页码']}</div></td></tr>`).join('')}</table>
     <p class="foot" style="margin-top:10px">${esc(d.detail)}</p>`;
+}
+
+async function agentRun(planner){
+  const q=document.getElementById('q').value.trim()||'2024年营业收入是多少';
+  const box=document.getElementById('agentBox');
+  box.innerHTML='<p class="empty">运行中…（LLM 调度会慢一些）</p>';
+  try{
+    const r=await fetch('/api/agent?planner='+planner,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q})});
+    const d=await r.json();
+    const pill = d.decision==='ANSWER'?'ok':'fail';
+    const srcBadge = s => `<span class="badge ${s==='llm'?'vector':(s==='tool'?'lexical':'label')}">${s}</span>`;
+    let html = `<div class="kv">
+        <span>问题：<b>${esc(d.question)}</b></span>
+        <span>路线：<b>${d.route}</b></span>
+        <span>决策：<span class="pill ${pill}">${d.decision}</span></span>
+        <span>步数 <b>${d.steps.length}</b></span>
+        <span>工具调用 <b>${d.tool_calls}</b></span>
+        <span>LLM 决策 <b>${d.llm_calls}</b></span>
+        <span>run_id <b>${d.run_id}</b></span>
+      </div>`;
+    if(d.note) html += `<p class="foot">⚠️ ${esc(d.note)}</p>`;
+    html += '<div>';
+    d.steps.forEach(s=>{
+      const mark = s.ok===null?'·':(s.ok?'✓':'✗');
+      html += `<div class="stage"><span class="dot ${s.ok===false?'fail':'ok'}"></span>
+        <span class="nm">${esc(s.node)}</span>
+        <span class="dt">${mark} ${s.tool?('→ '+esc(s.tool)):''} ${s.detail?('｜'+esc(s.detail)):''}
+          ${srcBadge(s.source)}</span></div>`;
+    });
+    html += '</div>';
+    if(d.decision==='ANSWER'){
+      const a=d.answer;
+      if(a.six_tuple){
+        html += `<div class="banner answer">可答 · 六元组齐全</div>
+          <table>${Object.entries(a.six_tuple).map(([k,v])=>`<tr><th>${k}</th><td class="v">${esc(v)}</td></tr>`).join('')}</table>
+          <blockquote>${esc(a.fragment||'')}</blockquote>`;
+      }else{
+        html += `<div class="banner answer">可答 · 勾稽核验</div>
+          <table>${Object.entries(a).filter(([k])=>k!=='来源'&&k!=='操作数')
+            .map(([k,v])=>`<tr><th>${esc(k)}</th><td class="v">${esc(typeof v==='object'?JSON.stringify(v, null, 0):v)}</td></tr>`).join('')}</table>`;
+      }
+    }else{
+      html += `<div class="banner refuse">${d.decision} · ${esc((d.refusal||{}).reason||'')}</div>
+        <p style="margin:0">${esc((d.refusal||{}).detail||'')}</p>`;
+    }
+    html += `<details style="margin-top:10px"><summary class="foot" style="cursor:pointer">轨迹回放（直接从 SQLite 读出）</summary>
+      <pre style="font-size:12.5px;overflow:auto;background:#f3f6f8;padding:10px;border-radius:6px">${esc(d.replay)}</pre></details>`;
+    box.innerHTML = html;
+    document.getElementById('graphText').textContent = d.graph || '';
+  }catch(e){
+    box.innerHTML='<p class="empty">请求失败：'+e+'</p>';
+  }
+}
+
+async function agentRuns(){
+  const box=document.getElementById('agentBox');
+  const r=await fetch('/api/agent/runs?limit=10'); const d=await r.json();
+  if(!d.runs.length){box.innerHTML='<p class="empty">暂无运行记录。</p>';return;}
+  box.innerHTML = `<table><tr><th>决策</th><td>`+
+    d.runs.map(x=>`<div class="cand">
+      <span class="rank">${esc(x.route||'')}</span>
+      <span class="lb">${esc(x.question)}
+        <div class="foot">${esc(x.started_at)} · 调度来源 ${esc(x.planner_source)}</div></span>
+      <span class="val"><span class="pill ${x.decision==='ANSWER'?'ok':'fail'}">${esc(x.decision)}</span>
+        <div class="foot">步 ${x.steps} / 工具 ${x.tool_calls} / LLM ${x.llm_calls}${x.budget_exceeded?' · 预算耗尽':''}</div></span>
+    </div>`).join('') + `</td></tr></table>`;
 }
 
 chips(); meta();

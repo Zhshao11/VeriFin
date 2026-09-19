@@ -30,6 +30,14 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
+from verifin.agent import (  # noqa: E402
+    Budget,
+    ToolRuntime,
+    TraceStore,
+    VeriFinAgent,
+    render_graph_text,
+)
+from verifin.agent.planner import LLMPlanner  # noqa: E402
 from verifin.formulas import FORMULA_REGISTRY, evaluate_formula  # noqa: E402
 from verifin.geometry import open_pdf  # noqa: E402
 from verifin.retrieval import RetrievalIndex, build_chunks  # noqa: E402
@@ -596,4 +604,111 @@ def meta() -> dict:
         "table_count": REPORT.table_count,
         "embedder": embedder,
         "pdf": PDF.name,
+        "agent_graph": render_graph_text(),
+    }
+
+
+# --------------------------------------------------------------------------
+# Agent 编排（D3）
+# --------------------------------------------------------------------------
+
+AGENT_TRACE = TraceStore(ROOT / "data/index/agent_trace_web.db")
+
+AGENT_RUNTIME = ToolRuntime(
+    by_label=BY_LABEL,
+    index=INDEX,
+    unit=DISCLOSURE_UNIT,
+    company=COMPANY,
+    period=PERIOD,
+    pdf_open=lambda: open_pdf(PDF),
+    index_lock=INDEX_LOCK,
+)
+
+_LLM_STATE: dict[str, object] = {"planner": None, "error": None}
+
+
+def _llm_planner():
+    """惰性构造 LLM 调度器。端点不可用时把原因留下，不静默降级。"""
+    if _LLM_STATE["planner"] is not None or _LLM_STATE["error"] is not None:
+        return _LLM_STATE["planner"], _LLM_STATE["error"]
+    try:
+        from verifin.llm import LLMClient
+
+        _LLM_STATE["planner"] = LLMPlanner(LLMClient.from_env())
+    except Exception as exc:  # noqa: BLE001
+        _LLM_STATE["error"] = f"{type(exc).__name__}: {exc}"
+    return _LLM_STATE["planner"], _LLM_STATE["error"]
+
+
+@app.post("/api/agent")
+def agent_run(req: AskRequest, planner: str = "policy") -> dict:
+    """跑一次完整编排：调度器在图里选节点，每一步工具调用都入轨迹库。"""
+    use_llm = planner == "llm"
+    impl = None
+    note = None
+    if use_llm:
+        impl, err = _llm_planner()
+        if impl is None:
+            note = f"LLM 调度不可用（{err}），本次改用确定性策略"
+
+    agent = VeriFinAgent(
+        AGENT_RUNTIME,
+        budget=Budget(),
+        planner=impl,
+        trace=AGENT_TRACE,
+        use_llm=impl is not None,
+    )
+    result = agent.run(req.question.strip())
+
+    steps = [
+        {
+            "seq": s.seq,
+            "node": s.node,
+            "tool": s.tool,
+            "args": s.args,
+            "ok": s.ok,
+            "detail": s.detail,
+            "source": s.source,
+        }
+        for s in result.steps
+    ]
+    payload = {
+        "question": result.question,
+        "run_id": result.run_id,
+        "route": result.route,
+        "decision": result.decision,
+        "answer": result.answer,
+        "refusal": result.refusal,
+        "steps": steps,
+        "tool_calls": result.tool_calls,
+        "llm_calls": result.llm_calls,
+        "budget_exceeded": result.budget_exceeded,
+        "note": note,
+        "replay": AGENT_TRACE.abbreviated(result.run_id),
+        "graph": render_graph_text(),
+    }
+    return payload
+
+
+@app.get("/api/agent/runs")
+def agent_runs(limit: int = 10) -> dict:
+    """最近的运行记录（轨迹可复盘）。"""
+    rows = AGENT_TRACE.runs()[: max(1, min(limit, 50))]
+    return {
+        "runs": [
+            {
+                "run_id": r["run_id"],
+                "question": r["question"],
+                "decision": r["decision"],
+                "reason": r["reason"],
+                "route": r["route"],
+                "steps": r["steps"],
+                "tool_calls": r["tool_calls"],
+                "llm_calls": r["llm_calls"],
+                "budget_exceeded": bool(r["budget_exceeded"]),
+                "planner_source": r["planner_source"],
+                "started_at": r["started_at"],
+            }
+            for r in rows
+        ]
     }

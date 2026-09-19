@@ -11,7 +11,7 @@
 
 <p align="center">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
-  <img alt="Tests" src="https://img.shields.io/badge/Tests-156%20passed-2EA043">
+  <img alt="Tests" src="https://img.shields.io/badge/Tests-189%20passed-2EA043">
   <img alt="Parser" src="https://img.shields.io/badge/Parser-MinerU%204.0-337ab7">
   <img alt="Locator" src="https://img.shields.io/badge/Locator-PyMuPDF%201.28-ff6f00">
   <img alt="Index" src="https://img.shields.io/badge/Index-SQLite%20FTS5-003B57?logo=sqlite&logoColor=white">
@@ -121,8 +121,9 @@ cp .env.example .env
 其他入口：
 
 ```bash
-.venv/bin/python -m pytest                      # 156 项测试
+.venv/bin/python -m pytest                      # 189 项测试
 .venv/bin/python scripts/demo_core.py           # 抽取 → span 校验 → 勾稽核验 → 拒答
+.venv/bin/python scripts/demo_agent.py          # Agent 端到端（加 --llm 用 LLM 做调度）
 .venv/bin/python scripts/parse_mineru_md.py     # MinerU 解析 + 恒等式自检
 .venv/bin/python scripts/check_llm.py           # 探测端点能力（工具调用 / 结构化输出）
 ```
@@ -134,7 +135,7 @@ cp .env.example .env
 # 打开 http://127.0.0.1:8765
 ```
 
-页面把上面那条链路摊开给人看，共五块：
+页面把上面那条链路摊开给人看，共六块：
 
 | 区块 | 展示什么 |
 |---|---|
@@ -143,15 +144,20 @@ cp .env.example .env
 | 四路召回明细 | 每条候选命中了哪几路、各路名次、RRF 分 |
 | 防幻觉演示台 | 同一条证据喂三次：真实值（采纳）/ 篡改值（拦截）/ 伪造片段（拦截） |
 | 勾稽核验 | 资产 = 负债 + 所有者权益，本期与上期双列，给出差额与推导出的容差 |
+| **Agent 编排** | 跑一次完整 Agent，逐步打印节点 / 工具 / 入参 / 来源（`llm` 还是 `policy`）/ 是否降级；可从轨迹库回放任一次历史运行 |
 
 > [!NOTE]
-> 演示页跑的是**确定性路径**，不经 LLM —— 它要证明的正是「每个数字都有确定性来源」。
-> Agent 编排（D3）接入后会在最前面补上意图解析与工具选择，但数值、算术、拒答判定永远走确定性代码。
+> 前五块跑的是**确定性路径**，不经 LLM —— 它们要证明的正是「每个数字都有确定性来源」。
+> 第六块（Agent）才引入调度，且调度器做的唯一一件事是**在合法后继里挑一个节点名**：
+> 数值、算术、拒答判定永远走确定性代码。
 
 ---
 
 ## 🔥 最近更新
 
+- **2026-09-19** Agent 编排落地（D3）：显式图 + 6 个工具 + 三重预算 + 执行轨迹入库。
+  **LLM 只选节点、参数由图填** —— 让「LLM 不产生数字」这条红线在编排层也成立
+- **2026-09-19** Web 演示页新增 Agent 编排区块：逐步轨迹 + 降级标记 + 历史运行回放
 - **2026-09-19** 检索层落地：四路召回（label / lexical / numeric / vector）+ RRF(k=60) 融合；`Embedder` 做成可插拔协议，本地 `TfidfEmbedder` 兜底
 - **2026-09-19** PyMuPDF 坐标层落地：词级容错匹配 + 同行垂直重叠校验 + 原文高亮 PNG 导出
 - **2026-09-19** 跨页表格拼接：多种表格序列化统一处理，资产负债表跨页不再是孤岛
@@ -232,13 +238,47 @@ embedding 会把 `12,345.67`、`12345.67`、`1.23亿元` 当成三个无关词�
 
 这解决的是「张冠李戴」：标签匹配对了，却取到隔壁行的数值 —— 坐标层用**同行垂直重叠校验**（`same_row_verified`）兜住这一关，不在同一行就不返回坐标。
 
+### 🤖 编排是一个显式图，不是一个黑盒循环
+
+```
+INTENT ──┬─→ SEARCH → EVIDENCE → VERIFY_SPAN → LOCATE → ANSWER
+         ├─→ LIST_FORMULAS → COMPUTE ─────────────────→ ANSWER
+         └─→ REFUSE（任何时刻都可直达）        ABORT（预算耗尽）
+```
+
+十个节点（其中 3 个是终态）、六个工具、一张邻接表。图是**声明式**的（`GRAPH` 字典就是图本身），
+所以既能渲染出来给人看，也能被单测逐条校验（后继是否都存在、终态是否真的无后继）。
+
+**谁在决定下一步** —— 这决定它算不算一个 Agent：
+
+| 决策者 | 能决定什么 | 不能决定什么 |
+|---|---|---|
+| LLM（`LLMPlanner`） | 在**当前节点的合法后继**里挑一个节点名 | 编节点名（非法值被丢弃并记 `raw_choice`）、填任何工具参数 |
+| 程序（`policy_decide`） | 确定性兜底：同样的状态永远得到同样的下一步 | — |
+
+两条硬约束都由程序执行，LLM 无权绕过：
+
+1. **工具入参由图从上一步状态里填**（`graph._fill_args`）。LLM 只挑节点名，
+   所以它在理由里写多少个数字，也进不了 `claimed_value` —— 这是红线 #1 在编排层的落点。
+2. **`ANSWER` 节点先查六元组是否齐全**，不齐就照样转 `REFUSE`。LLM 选了 `ANSWER` 也不算数。
+
+**降级不掩盖**：LLM 没配、调用失败、返回非法值、预算用尽 —— 任何一种情况都会退到确定性策略，
+并在结果里标 `source="policy"`。**这个字段是给消融实验读的**，
+否则「LLM 调度没效果」这种结论可能只是因为它压根没被调用。
+
+**预算按次运行计**（`max_steps=12` / `max_tool_calls=10` / `max_llm_calls=8`），
+每次 `run()` 重置 —— 调度器会被多个问题复用，计数器若跨运行累积，第二个问题起就会静默降级。
+
+**每一步都落库**：`data/index/agent_trace.db` 记录节点、工具、入参、返回值、来源与降级标记，
+可逐步回放。正确性可复查，不靠日志猜。
+
 ---
 
 ## 🔎 系统架构
 
 ```mermaid
 flowchart TD
-    Q["用户提问<br/>如：2024 年营业收入是多少"] --> AG["Agent 编排层<br/>Pydantic AI 显式图 · 预算控制"]
+    Q["用户提问<br/>如：2024 年营业收入是多少"] --> AG["Agent 编排层<br/>显式图 · 6 工具 · 三重预算"]
 
     subgraph PR["解析层"]
         M["MinerU 4.0<br/>表格结构 + 页码"] --> ST["跨页表格拼接<br/>表头下传 · 按科目名合并"]
@@ -253,7 +293,7 @@ flowchart TD
     end
 
     ST --> RT
-    AG --> RT
+    AG -.只挑节点名.-> RT
     RT --> RRF["RRF 融合 k=60<br/>只比排名，不比分数"] --> EV["证据候选<br/>带页码 + 原文片段"]
 
     subgraph VF["核验层"]
@@ -268,9 +308,11 @@ flowchart TD
     CHK -- 是 --> OK["输出答案<br/>公司·期间·指标·数值·单位·页码+原文片段"]
     CHK -- 否 --> NO["程序级拒答<br/>说明缺哪个字段"]
     PM -.坐标绑定.-> OK
+    AG -.入参由图填，不写数字.-> VF
 ```
 
-**一条数据都不会从 LLM 那条路出来**：LLM 只负责理解意图、选择工具、组织语言；数值、算术、拒答判定全在上面三条确定性路径里。
+**一条数据都不会从 LLM 那条路出来**：LLM 只负责理解意图、选择节点、组织语言；
+数值、算术、拒答判定全在上面三条确定性路径里。
 
 ---
 
@@ -287,18 +329,24 @@ VeriFin/
 │   ├── geometry.py       # PyMuPDF 坐标层：容错定位 + 同行校验 + 高亮导出
 │   ├── lexicon.py        # 财务专用词典（jieba 不认识会计科目，必须注入）
 │   ├── retrieval.py      # 四路检索 + RRF 融合 + 可插拔 Embedder
+│   ├── agent/            # Agent 编排层 —— 显式图，不依赖任何 Agent 框架
+│   │   ├── graph.py      #   节点表 + 邻接表 + 预算三件套 + 参数由图填
+│   │   ├── planner.py    #   LLM 选节点 + 确定性兜底（降级标 source="policy"）
+│   │   ├── tools.py      #   6 个工具 + ToolRuntime 资源容器 + 科目名对齐表
+│   │   └── trace.py      #   执行轨迹入库（SQLite），逐步可回放
 │   ├── models.py         # Pydantic 数据模型 + JSON Schema
 │   └── llm.py            # OpenAI 兼容客户端，带结构化输出降级
 ├── web/
-│   ├── server.py         # 演示服务：确定性链路的 HTTP 封装（FastAPI）
-│   └── index.html        # 演示页：轨迹 / 六元组 / 证据特写 / 防幻觉 / 勾稽
+│   ├── server.py         # 演示服务：确定性链路 + `/api/agent`（FastAPI）
+│   └── index.html        # 演示页：轨迹 / 六元组 / 证据特写 / 防幻觉 / 勾稽 / Agent
 ├── scripts/
 │   ├── demo_core.py      # 端到端：抽取 → span 校验 → 勾稽核验 → 拒答
 │   ├── demo_evidence.py  # 全链路：解析 → 检索 → 坐标定位 → 高亮图
+│   ├── demo_agent.py     # Agent：意图 → 选节点 → 调工具 → 六元组 / 拒答
 │   ├── parse_mineru_md.py# MinerU 解析 + 恒等式自检
 │   ├── bootstrap_env.sh  # 环境引导（含 pip sdist 绕行）
 │   └── check_llm.py      # 端点能力探测
-├── tests/                # 156 项测试
+├── tests/                # 189 项测试
 └── docs/                 # 选型 / 缺陷留档 / 接手入口
 ```
 
@@ -335,15 +383,21 @@ LLM_MODEL=your-model-name
 | 测试模块 | 数量 | 覆盖对象 |
 |---|---|---|
 | `test_formulas.py` | 36 | 勾稽公式、容差推导、三级结论 |
-| `test_normalize.py` | 27 | 单位换算、全角半角、千分位 |
-| `test_span.py` | 20 | span 硬校验两层关卡 |
 | `test_tables.py` | 32 | 双序列化解析、跨页拼接、数值列推导 |
-| `test_geometry.py` | 25 | 容错匹配、折行标签、同行校验、页码边界 |
-| `test_retrieval.py` | 16 | 词典、四路召回、RRF、端到端 |
+| `test_agent.py` | 33 | 图结构合法性、路线分流、六元组装配、拒答、预算终止、降级标记、轨迹回放 |
+| `test_normalize.py` | 27 | 单位换算、全角半角、千分位 |
+| `test_geometry.py` | 21 | 容错匹配、折行标签、同行校验、页码边界 |
+| `test_span.py` | 20 | span 硬校验两层关卡 |
+| `test_retrieval.py` | 20 | 词典、四路召回、RRF、端到端 |
 
 > [!TIP]
 > `normalize` / `span` / `compute` / `formulas` 四个核心模块**只依赖 Python 标准库**。
 > 核验规则可以脱离 LLM、脱离解析层单独测试 —— 即使模型服务或解析器不可用，判定逻辑依然可验证。
+>
+> `test_agent.py` 里**没有一次真实 LLM 调用，也没有真实 PDF**：
+> 调度器、工具资源、PDF 句柄全部是可注入的假实现。
+> 这不是为了跑得快，而是因为「LLM 不参与数值 / 不参与拒答判定」这两条红线
+> **只有在一个没有 LLM 的环境里才能被证明。**
 
 ---
 
@@ -353,7 +407,7 @@ LLM_MODEL=your-model-name
 |---|---|
 | `docs/项目上下文速览-v1.0.md` | 新会话接手入口：模块清单、已知缺陷、下一步 |
 | `docs/技术选型-v1.1.md` | 选型的唯一权威来源，含每层候选对比与实测依据 |
-| `docs/技术问题留档.md` | P-001 ~ P-012：跨页表格、附注列、端点无 embedding、科目名口径等的设计级缺陷归档 |
+| `docs/技术问题留档.md` | P-001 ~ P-015：跨页表格、附注列、端点无 embedding、科目名口径、编排层红线冲突等的设计级缺陷归档（含每条的原方案 / 短板 / 实测证据 / 解决方案 / **残留限制**） |
 | `docs/开源底座选型与二次开发方案-v0.1.md` | 开源平台调研：为何不整体 fork RAGFlow / Dify / QAnything |
 | `docs/财报核验Agent-方案设计-v0.1.md` | 原始方案设计 |
 
@@ -363,11 +417,12 @@ LLM_MODEL=your-model-name
 
 | 阶段 | 工作 | 状态 |
 |---|---|---|
+| D0 | 核心核验层：六元组 / span 校验 / Decimal / 公式注册表 | ✅ 已完成 |
 | D1 | MinerU 解析层：年报 → 带页码的结构化块 | ✅ 已完成 |
 | D2 | 四路检索 + RRF 融合 | ✅ 已完成 |
 | D2b | PyMuPDF 坐标层 + 原文高亮导出 | ✅ 已完成 |
-| D3 | Agent 编排：显式图 + 6 个工具 + 预算控制 + 执行轨迹入库 | 🔜 进行中 |
-| D4 | 评测集：FinanceBench 开放集 + 自建 A 股集（含拒答题） | ⬜ 待开始 |
+| D3 | Agent 编排：显式图 + 6 个工具 + 预算控制 + 执行轨迹入库 | ✅ 已完成 |
+| D4 | 评测集：FinanceBench 开放集 + 自建 A 股集（含拒答题） | 🔜 进行中 |
 | D5 | V0 / V1 / V2 三版 + 消融实验 | ⬜ 待开始 |
 | D6 | 失败案例归档与演示 | ⬜ 待开始 |
 
@@ -376,6 +431,15 @@ LLM_MODEL=your-model-name
 > [!NOTE]
 > 预期现象：V1 → V2 准确率上升，**且拒答率显著上升**。
 > 拒答率上升不是缺点 —— 那是护栏在生效的证据。
+
+**D3 给 D4/D5 留下的三条纪律**（都是编排层实跑暴露出来的）：
+
+1. **消融要看轨迹里的 `source` 字段**，统计「LLM 真实参与了多少步」。
+   调度器被多个问题复用，预算若不按运行重置，第二个问题起会静默降级 ——
+   那会让消融得出「LLM 调度没用」的错误结论。
+2. **`ABORT` 与 `REFUSE` 分开统计**。前者是「没算完」，后者是「证据不足」。
+   混在一起会把规划器的缺陷记成召回失败。
+3. **并发评测前先把 planner 改成 per-request 实例**，否则并发请求互相偷预算。
 
 ---
 
@@ -407,6 +471,15 @@ LLM_MODEL=your-model-name
 4. **坐标层依赖 PDF 内嵌文本层**。扫描版（图片型）PDF 没有文本层，需要先接 OCR 通道。
 5. **跨页表格拼接依赖「续页不带表头」这一约定**。若发行人重复打印了表头，会把续页误判为新表。
 6. **支持范围**：单份中文年报 PDF 的核验问答。不支持实时行情、股价、新闻，以及多公司批量对比。
+7. **编排层的兜底策略不会真正重试检索**。「换关键词重搜」只在 LLM 调度时发生；
+   LLM 全程不可用时，第一次没召回到就必然拒答。这是刻意选择 ——
+   宁可漏答，也不要因重试把预算烧光后给出语焉不详的 `ABORT`。
+8. **Web 服务内共享一个调度器**，并发请求会互相消耗 LLM 预算（不会产生错误答案，只是更容易降级）。
+   单用户演示无影响；并发评测前需改为 per-request 实例。
+9. **没有现成的可观测性生态**。编排层未引入任何 Agent 框架，
+   因此也没有 Logfire / OTel 那类追踪，`trace.py` 的 SQLite 轨迹是唯一手段。
+10. **「不用 Pydantic AI」这一条是范式判断，不是实测否决** —— 本项目从未安装过它。
+    如实列出，避免被追问时说不清依据（完整论证见 `docs/技术问题留档.md` P-013）。
 
 ---
 
