@@ -1,0 +1,35 @@
+# 凭证与本地环境
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 临时构建目录（pip 解包 sdist 的绕行方案会用到）
+.tmp/
+blobs/
+
+# 会话/记忆目录：含本机绝对路径与端点信息，默认不入仓库
+# 如需把项目上下文也版本化，删掉下一行即可
+.workbuddy/
+
+# 数据与产物（体积大，不入仓库）
+data/pdfs/*.pdf
+data/parsed/
+data/index/
+*.sqlite
+*.sqlite3
+*.db
+outputs/
+logs/
+*.tar.gz
+
+# macOS
+.DS_Store

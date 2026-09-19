@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fin-verify-agent"
+version = "0.1.0"
+description = "财报核验 Agent：从年报 PDF 中检索证据，给出带原文页码引用的数字，并自动核验财务勾稽关系"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+    "openai>=1.30",
+]
+
+[project.optional-dependencies]
+# 解析层。体积较大，按需安装。
+parse = [
+    "mineru>=4.0,<5",
+    "pymupdf>=1.24",
+]
+# 检索层。
+retrieve = [
+    "jieba>=0.42",
+    "numpy>=1.26",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["fin_verify*"]
+
+[tool.pytest.ini_options]
+# 让测试能直接 import fin_verify，无需先 pip install -e .
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
