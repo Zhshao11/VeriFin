@@ -11,10 +11,7 @@
 from __future__ import annotations
 
 import argparse
-import re
-import sqlite3
 import sys
-import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -29,11 +26,11 @@ from verifin.agent import (  # noqa: E402
 )
 from verifin.agent.planner import LLMPlanner  # noqa: E402
 from verifin.geometry import open_pdf  # noqa: E402
-from verifin.retrieval import RetrievalIndex, build_chunks  # noqa: E402
-from verifin.tables import stitch_file  # noqa: E402
+from verifin.runtime import build_document_runtime  # noqa: E402
 
 PDF = ROOT / "data/pdfs/MOUTAI_2024_ANNUAL.pdf"
 PRODUCT = ROOT / "data/parsed/moutai2024_fs"
+STITCHED = ROOT / "data/parsed/moutai2024_fs_stitched.md"
 INDEX_DB = ROOT / "data/index/moutai2024.db"
 TRACE_DB = ROOT / "data/index/agent_trace.db"
 
@@ -44,8 +41,6 @@ PERIOD = "2024 年度（2024-01-01 ~ 2024-12-31）"
 #: 六元组的前两个字段必须有明确来源，来源是"配置"就得说"配置"。
 IDENTITY_SOURCE = "演示配置（封面结构化解析未接入）"
 
-UNIT_RE = re.compile(r"单位\s*[:：]\s*(万元|百万元|千元|亿元|元)")
-
 QUESTIONS = [
     "2024年营业收入是多少",
     "负债合计",
@@ -55,46 +50,25 @@ QUESTIONS = [
 ]
 
 
-def detect_unit() -> tuple[str, str]:
-    """从解析产物里读披露单位。
-
-    返回 `(单位, 来源说明)` —— 来源必须能被打印出来核对。
-    精确字典匹配，不用宽松正则：宽松匹配会把「编制单位:贵州茅台酒股份有限公司」
-    里的公司名当成货币单位（这个错犯过一次）。
-    """
-    paths: list[Path] = []
-    stitched = ROOT / "data/parsed/moutai2024_fs_stitched.md"
-    if stitched.exists():
-        paths.append(stitched)
-    if PRODUCT.exists():
-        paths.append(PRODUCT)
-
-    for path in paths:
-        hit = UNIT_RE.search(path.read_text(encoding="utf-8", errors="ignore"))
-        if hit:
-            return hit.group(1), f"解析产物的 单位: 声明（{path.name}）"
-    return "元", "解析产物里没有 单位: 声明，回退为「元」（偏保守，可能产生假阳性）"
-
-
 def build_runtime() -> tuple[ToolRuntime, str]:
-    report = stitch_file(PRODUCT)
-    chunks = build_chunks(report.tables, "MOUTAI_2024")
-    by_label: dict[str, object] = {}
-    for c in chunks:
-        by_label.setdefault(c.label, c)
+    """装配真实年报的运行时。
 
-    unit, unit_source = detect_unit()
-    index = RetrievalIndex(sqlite3.connect(str(INDEX_DB), check_same_thread=False))
-    runtime = ToolRuntime(
-        by_label=by_label,
-        index=index,
-        unit=unit,
+    装配本身在 `verifin.runtime` 里，与网页端、评测执行器共用同一份 ——
+    否则三处各自漂移，评测量到的就不是演示里跑的那个系统。
+    """
+    doc = build_document_runtime(
+        doc_id="MOUTAI_2024",
+        product=PRODUCT,
+        index_db=INDEX_DB,
+        pdf=PDF,
+        stitched=STITCHED,
+    )
+    runtime = doc.tool_runtime(
         company=COMPANY,
         period=PERIOD,
         pdf_open=lambda: open_pdf(PDF),
-        index_lock=threading.Lock(),
     )
-    return runtime, unit_source
+    return runtime, doc.unit_source
 
 
 def print_result(result, unit_source: str) -> None:

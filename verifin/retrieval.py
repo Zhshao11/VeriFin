@@ -58,6 +58,10 @@ from .normalize import normalize_text, parse_amounts
 
 __all__ = [
     "DEFAULT_RRF_K",
+    "MIN_CONTAINED_LABEL_LEN",
+    "STRONG_CHANNELS",
+    "WEAK_CHANNELS",
+    "STOPWORDS",
     "Chunk",
     "Hit",
     "RetrievalResult",
@@ -75,6 +79,19 @@ __all__ = [
 #: 作用是压低高名次与低名次之间的分差，让各通道的影响力趋于均衡。
 DEFAULT_RRF_K = 60
 
+#: 「科目名整段出现在问句里」这一档的最短科目名长度。
+#: 设成 2 是为了不丢掉「存货」这类两字科目；
+#: 由此引入的噪声由「按科目名长度降序」压住 —— 问句里同时出现「其他」与
+#: 「其他应收款」时，排前面的是后者。
+MIN_CONTAINED_LABEL_LEN = 2
+
+#: 能**产生召回**的通道。判据都是硬匹配（整段科目名 / 真实词元重合 / 数字精确相等）。
+STRONG_CHANNELS: tuple[str, ...] = ("label", "lexical", "numeric")
+
+#: 只能**重排**、不能产生召回的通道。本地 TF-IDF 属于这一类，
+#: 理由见 `tokenize` 的第 4 条与 `RetrievalIndex.retrieve` 里的说明。
+WEAK_CHANNELS: tuple[str, ...] = ("vector",)
+
 _CJK = re.compile(r"[\u4e00-\u9fff]+")
 _TOKEN = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]")
 _NUMERIC_TOKEN = re.compile(r"^[\d,，.]+$")
@@ -91,7 +108,7 @@ STOPWORDS: frozenset[str] = frozenset({
 def tokenize(text: str) -> list[str]:
     """jieba 切词，只保留有检索意义的词元。
 
-    三条约定，每条都对应一处实测教训：
+    四条约定，每条都对应一处实测教训：
 
     1. **索引侧与查询侧必须用同一个函数**（P-003 的直接结论）。
        任一侧漏切都会导致分词粒度不一致，进而**静默 0 命中**。
@@ -100,6 +117,17 @@ def tokenize(text: str) -> list[str]:
        于是 `营业外收入`、`手续费及佣金收入` 会抢走「营业收入」的排名。
        这在实际效果上等同于取错科目，而它同样不会报错。
     3. 只保留汉字词元与字母数字词元，标点与空白直接丢弃。
+    4. **功能词必须在切词阶段就丢掉**（D4 建题库时补上的）。
+       原先 :data:`STOPWORDS` 只在词法通道的**查询侧**过滤，
+       向量通道没过滤 —— 于是「是否有实质共同词」这件事在向量通道上失效：
+       问句「火星基地2024年的折旧年限是多少年？」里只剩一个词元「的」在词表内，
+       查询向量退化成**「的」这一个方向的单位向量**，
+       与库中含「的」最多的那一行余弦相似度高达 0.40，
+       比正确问句（「货币资金」，0.26）还高。
+       后果不是排序差，而是**四路都"有召回"**，
+       `NO_RECALL` 拒答护栏被彻底架空 —— 无关问题也会拿到一个言之凿凿的数。
+       把过滤放进 `tokenize` 而不是只加在查询侧，是为了让两侧共用同一条规则，
+       不给"下次有人在向量通道忘了过滤"留口子。
     """
     if not text:
         return []
@@ -114,6 +142,8 @@ def tokenize(text: str) -> list[str]:
             continue
         if not (_CJK.match(word) or _TOKEN.fullmatch(word)):
             continue  # 标点、空白。
+        if word in STOPWORDS:
+            continue  # 功能词：不构成任何财务语义，留着只会制造噪声。
         out.append(word)
     return out
 
@@ -528,16 +558,20 @@ class RetrievalIndex:
         2. **纯数字词元直接剔除**。`298,944,579,918.70` 进 BM25 会被切成
            `298 AND 944 AND 579 AND 918.70`，制造大量垃圾命中。
            数字有专门的 `numeric` 通道，不该混进来。
-        3. **用 OR 而不是 AND**。AND 要求一条记录同时包含所有分词，
+        4. **纯数字词元直接剔除**。`298,944,579,918.70` 进 BM25 会被切成
+           `298 AND 944 AND 579 AND 918.70`，制造大量垃圾命中。
+           数字有专门的 `numeric` 通道，不该混进来。
+        5. **用 OR 而不是 AND**。AND 要求一条记录同时包含所有分词，
            这对自然语言提问几乎必然失败——「2024年营业收入是多少」里
            没有任何一行会同时出现「营业收入」和「多少」。
            改 OR 后靠 **BM25 自身的排序**天然表达"命中词越多越靠前"，
            召回与排序同时得到改善，且不引入任何需要调参的加权逻辑。
+
+        Note:
+            功能词（`STOPWORDS`）已在 `tokenize` 里被丢掉，这里不再重复过滤 ——
+            同一件事在两层各做一次，改规则时极易只改一处。
         """
-        tokens = [
-            t for t in tokenize(query)
-            if not _NUMERIC_TOKEN.match(t) and t not in STOPWORDS
-        ]
+        tokens = [t for t in tokenize(query) if not _NUMERIC_TOKEN.match(t)]
         if not tokens:
             return []
         match_expr = " OR ".join(tokens)
@@ -555,15 +589,23 @@ class RetrievalIndex:
 
     # ---- 通道 B：精确科目名 ----
     def label_search(self, query: str, limit: int = 20) -> list[str]:
-        """科目名精确匹配。
+        """科目名匹配。**完全相等优先，其次是「科目名整段出现在问句里」。**
 
         为什么需要单独一路：BM25 只看词的重合，**不区分完整匹配与子串匹配**。
         实测查询「负债合计」时，`非流动负债合计` 会因为同时命中「负债」「合计」
         而排在真正的 `负债合计` 之前——这在财务场景是致命的，
         因为取错一个科目就等于取错一个数。
 
-        这一路用「科目名完全相等」把目标顶到第一名。
-        返回时按页码升序，保证同名科目（合并报表 vs 母公司报表）顺序稳定。
+        为什么要加「整段出现」这一档（D4 建题库时才暴露）：
+        原先只做**整串相等**，于是这条路只对「用户只打一个科目名」有效。
+        真实问句是「2024年合并资产负债表的货币资金是多少？」——整串相等必然不命中，
+        这一路等于关闭；结果一个又长又错的科目靠 TF-IDF 相似度排到了第一位，
+        题面里明明写着「货币资金」，系统却答了「处置固定资产…收回的现金净额」
+        （实测失败，见 `docs/评测基线-v1.0.md`）。
+
+        整段包含比 BM25 的子串重合精确得多：它要求**整个科目名**出现在问句里，
+        而不是几个字碰巧重合。同名科目（合并 vs 母公司）按页码升序，
+        顺序稳定、可复现。
         """
         key = normalize_text(query)
         if not key:
@@ -571,13 +613,32 @@ class RetrievalIndex:
         rows = self._con.execute(
             "SELECT chunk_id, label, page FROM chunks"
         ).fetchall()
-        hits = [
-            (r["page"], r["chunk_id"])
-            for r in rows
-            if normalize_text(r["label"]) == key
-        ]
-        hits.sort(key=lambda kv: (kv[0], kv[1]))
-        return [cid for _, cid in hits[:limit]]
+
+        exact: list[tuple[int, str]] = []
+        contained: list[tuple[int, int, str]] = []
+        for r in rows:
+            label = normalize_text(r["label"])
+            if not label:
+                continue
+            if label == key:
+                exact.append((r["page"], r["chunk_id"]))
+            elif len(label) >= MIN_CONTAINED_LABEL_LEN and label in key:
+                # 按科目名长度降序：问句里同时出现「其他」与「其他应收款」时，
+                # 长的那一个才是用户真正指的科目。
+                contained.append((-len(label), r["page"], r["chunk_id"]))
+
+        exact.sort(key=lambda kv: (kv[0], kv[1]))
+        contained.sort()
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for cid in [c for _, c in exact] + [c for _, _, c in contained]:
+            if cid not in seen:
+                seen.add(cid)
+                out.append(cid)
+            if len(out) >= limit:
+                break
+        return out
 
     # ---- 通道 B：数值精确 ----
     def numeric_search(self, query: str, limit: int = 20) -> list[str]:
@@ -651,7 +712,19 @@ class RetrievalIndex:
                 warnings.append(f"{channel} 通道失败：{type(exc).__name__}: {exc}")
                 ranked[channel] = []
 
-        fused = rrf_fuse(ranked, k=rrf_k)[:top_k]
+        fused = rrf_fuse(ranked, k=rrf_k)
+
+        # 弱通道只做重排，不做召回：候选必须至少被一路强通道支持过。
+        #
+        # 为什么必须分开（D4 实测）：本地向量是 TF-IDF，长文本相似度只在
+        # 「有共同词」时才可靠，而它对**没有共同词**的问句也会给出正分
+        # （见 tokenize 的第 4 条说明）。让它产生召回，等于给每个问题都发一张
+        # 「总能找到点什么」的通行证 —— 拒答护栏当场失效。
+        # 强通道的判据是硬匹配：label 要求整段科目名出现，lexical 要求真实词元重合，
+        # numeric 要求数字精确相等。三者都命中不到，才是真的没召回。
+        strong = {cid for ch in STRONG_CHANNELS for cid in ranked.get(ch, [])}
+        fused = [item for item in fused if item[0] in strong][:top_k]
+
         hits = tuple(
             Hit(chunk=self._get_chunk(cid), score=score, via=via_, ranks=ranks_)
             for cid, score, via_, ranks_ in fused

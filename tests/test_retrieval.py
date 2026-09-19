@@ -278,3 +278,100 @@ def test_end_to_end_retrieval_on_real_annual_report() -> None:
             )
     finally:
         idx.close()
+
+
+# --------------------------------------------------------------------------
+# 科目名通道：整段出现（D4 建题库时补上）
+# --------------------------------------------------------------------------
+
+
+def test_label_channel_matches_account_name_inside_a_question() -> None:
+    """真实问句里科目名是**整段出现**的，不是整串相等。
+
+    原先该通道只做整串相等，于是只对「用户只打一个科目名」有效；
+    问句一旦成句，这一路等于关闭 —— 实测表现为「一个又长又错的科目
+    靠 TF-IDF 相似度排到第一位」（题面写着货币资金，答的却是别的科目）。
+    """
+    idx = build_test_index(
+        [
+            make_chunk("a", "负债合计", ("100.00",), page=60),
+            make_chunk("b", "非流动负债合计", ("20.00",), page=60),
+        ]
+    )
+    try:
+        res = idx.retrieve("2024年合并资产负债表的负债合计是多少？", top_k=2)
+        assert not res.is_empty
+        assert res.hits[0].chunk.label == "负债合计"
+        assert "label" in res.hits[0].via
+    finally:
+        idx.close()
+
+
+def test_label_channel_prefers_the_longest_contained_label() -> None:
+    """问句里同时出现短科目名与长科目名时，用户指的是长的那一个。"""
+    idx = build_test_index(
+        [
+            make_chunk("a", "其他", ("1.00",), page=1),
+            make_chunk("b", "其他应收款", ("2.00",), page=1),
+        ]
+    )
+    try:
+        res = idx.retrieve("其他应收款是多少？", top_k=2)
+        assert res.hits[0].chunk.label == "其他应收款"
+    finally:
+        idx.close()
+
+
+# --------------------------------------------------------------------------
+# 通道强弱：向量只重排，不产生召回
+# --------------------------------------------------------------------------
+
+
+def test_tokenize_drops_function_words() -> None:
+    """功能词必须在切词阶段丢掉：留在向量里会制造出「似曾相识」的相似度。"""
+    assert "的" not in tokenize("资产的构成")
+    assert "多少" not in tokenize("营业收入是多少")
+
+
+def test_stopword_only_query_cannot_produce_recall() -> None:
+    """回归守卫：问句里只剩功能词时，不得产生任何召回。
+
+    实测事故：问句「火星基地2024年的折旧年限是多少年？」
+    里只有「的」在词表内，查询向量退化成「的」这一个方向的单位向量，
+    与库中含「的」最多的那一行余弦相似度高达 0.40 —— **比正确问句（0.26）还高**。
+    于是四路都"有召回"，`NO_RECALL` 拒答护栏被架空，无关问题也会拿到一个数。
+    """
+    idx = build_test_index(
+        [make_chunk("a", "偿还债务支付的现金", ("1.00",), page=67)]
+    )
+    try:
+        assert idx.retrieve("火星基地2024年的折旧年限是多少年？").is_empty
+    finally:
+        idx.close()
+
+
+def test_vector_channel_alone_cannot_produce_recall() -> None:
+    """弱通道只做重排：只开向量通道时，召回必须为空。
+
+    这是一条**结构性保证**，不是当前数据的巧合：本地向量是 TF-IDF，
+    对没有共同词的问句也会给正分。将来若换成真 embedding，
+    相似度只会更"平滑"，更需要这条规则兜住拒答护栏。
+    """
+    idx = build_test_index([make_chunk("a", "资产总计", ("298,944,579,918.70",))])
+    try:
+        res = idx.retrieve("资产总计", channels=("vector",))
+        assert res.per_channel["vector"] >= 1, "向量通道本身应当命中，否则这条测试没意义"
+        assert res.is_empty
+    finally:
+        idx.close()
+
+
+def test_numeric_channel_is_strong() -> None:
+    """纯数字查询不靠词法，但数字精确相等是硬匹配，属于强通道。"""
+    idx = build_test_index([make_chunk("a", "资产总计", ("298,944,579,918.70",))])
+    try:
+        res = idx.retrieve("298,944,579,918.70")
+        assert not res.is_empty
+        assert res.hits[0].chunk.label == "资产总计"
+    finally:
+        idx.close()

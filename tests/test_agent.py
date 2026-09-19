@@ -159,6 +159,40 @@ def test_classify_intent_picks_f1_when_hints_present():
     assert formula == "F1"
 
 
+@pytest.mark.parametrize(
+    "question,formula",
+    [
+        ("2024年合并利润表的净利润是否等于利润总额减去所得税费用？", "F2a"),
+        ("归属于母公司股东的净利润是否等于净利润减去少数股东损益？", "F2b"),
+        ("经营活动、投资活动、筹资活动产生的现金流量净额加总是否等于净增加额？", "F3a"),
+        ("2024年合并口径的毛利率是多少？", "F4"),
+        ("2024年营业收入同比增长是否异常？", "F6"),
+    ],
+)
+def test_classify_intent_reaches_every_registered_formula(question, formula):
+    """注册表里有不等于用得上。
+
+    早先触发词表只有 F1 一条，另外 7 条公式**永远选不到**；
+    问 F2a 会退回默认的 F1，于是拿资产负债表的科目去算利润表的恒等式，
+    一路走到 `MISSING_OPERANDS` 才失败 —— 失败得很晚，原因还指错了层。
+    D4 建题库要问到 F2a/F2b/F4 时才暴露。
+    """
+    route, got = classify_intent(question)
+    assert route == "VERIFY"
+    assert got == formula
+
+
+def test_plain_value_question_stays_lookup():
+    """加了公式触发词，不能让「某某科目是多少」被误判成核验题。"""
+    for question in (
+        "2024年营业收入是多少",
+        "资产总计是多少",
+        "负债合计",
+        "2024年合并资产负债表的未分配利润是多少？",
+    ):
+        assert classify_intent(question) == ("LOOKUP", None), question
+
+
 # --------------------------------------------------------------------------
 # LOOKUP 路线
 # --------------------------------------------------------------------------
@@ -538,3 +572,56 @@ def test_trace_store_survives_concurrent_writes():
             assert len(store.steps(f"run{n}-9")) == 1
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------
+# 候选轮换：取不到值的候选必须被跳过，而不是原地重试
+# --------------------------------------------------------------------------
+
+
+def test_unusable_candidate_is_skipped_instead_of_retried() -> None:
+    """回归守卫：一个取不到值的候选不得被反复重试到预算耗尽。
+
+    实测（D4）：候选「筹资活动现金流入小计」在报表里没有本期列，
+    `get_row_evidence` 返回 `COLUMN_MISSING`，但 `_absorb` 只在**成功**时
+    才把科目记进 `tried`，于是 `_next_candidate` 每次都返回同一个科目，
+    兜底策略以为「还有下一条候选」，连续重试 8 次直到工具预算耗尽，
+    最后报成 `ABORT / BUDGET_EXCEEDED` ——
+    真实原因是「候选不可用」，报出来的原因却指向预算，指错了排查方向。
+    """
+    chunks = {
+        "现金及现金等价物净增加额": FakeChunk(
+            "现金及现金等价物净增加额", (), 67, "现金及现金等价物净增加额"
+        ),
+        "投资活动现金流入小计": FakeChunk(
+            "投资活动现金流入小计", ("8,648,630,396.52",), 67,
+            "投资活动现金流入小计 | 8,648,630,396.52",
+        ),
+    }
+    rt = ToolRuntime(by_label=chunks, unit="元", company="某公司", period="2024 年度")
+    result = VeriFinAgent(rt).run(
+        "现金及现金等价物净增加额 与 投资活动现金流入小计 分别是多少"
+    )
+
+    evidence_steps = [s for s in result.steps if s.node == "EVIDENCE"]
+    assert len(evidence_steps) == 2, [
+        (s.node, s.detail[:40]) for s in result.steps
+    ]
+    assert evidence_steps[0].ok is False
+    assert evidence_steps[1].ok is True
+    assert result.decision == "ANSWER", result.refusal
+    assert result.answer["six_tuple"]["指标"] == "投资活动现金流入小计"
+
+
+def test_all_candidates_unusable_leads_to_refusal_not_abort() -> None:
+    """候选全部不可用时，结局必须是 REFUSE（证据不足），不是 ABORT（没算完）。"""
+    chunks = {
+        "衍生金融资产": FakeChunk("衍生金融资产", (), 59, "衍生金融资产"),
+        "应收款项融资": FakeChunk("应收款项融资", (), 59, "应收款项融资"),
+    }
+    rt = ToolRuntime(by_label=chunks, unit="元", company="某公司", period="2024 年度")
+    result = VeriFinAgent(rt).run("衍生金融资产 与 应收款项融资 分别是多少")
+
+    assert result.decision == "REFUSE", [s.detail[:40] for s in result.steps]
+    assert result.budget_exceeded is False
+    assert result.refusal["reason"] == "COLUMN_MISSING"

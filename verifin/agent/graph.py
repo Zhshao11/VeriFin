@@ -136,21 +136,74 @@ class RunResult:
 # --------------------------------------------------------------------------
 
 VERIFY_KEYWORDS = ("平衡", "勾稽", "是否成立", "核验", "等于", "加总", "不平衡")
-FORMULA_HINTS: dict[str, tuple[str, ...]] = {
-    "F1": ("资产", "负债", "所有者权益"),
+
+#: 公式触发词表：公式 id → (触发词, 触发门槛)。
+#:
+#: 门槛不是一律 2，因为触发词的性质不同：
+#:
+#: - 「毛利率」「同比」这类词**自身就足够独特**，出现一次即可确定意图（门槛 1）；
+#: - 「资产总计」「负债合计」这类词会**分散出现在许多科目名里**，
+#:   单个词可能只是顺带提到，必须同时命中两个才敢判定（门槛 2）。
+#:
+#: 早先这张表只有 F1 一条，导致注册表里另外 7 条公式**永远选不到** ——
+#: D4 建题库时为了能问到 F2a/F2b/F4 才发现。**注册表里有不等于用得上**。
+#: 漏加门槛更高的公式不会静默出错：它会退回 `VERIFY` + 默认 F1，被评测当成取错公式。
+FORMULA_HINTS: dict[str, tuple[tuple[str, ...], int]] = {
+    "F1": (("资产总计", "负债合计", "所有者权益合计"), 2),
+    "F2a": (("净利润", "利润总额", "所得税费用"), 2),
+    "F2b": (("归属于母公司", "少数股东损益"), 2),
+    "F3a": (("经营活动", "投资活动", "筹资活动", "净增加额"), 2),
+    "F3b": (("期末现金", "期初现金"), 2),
+    "F4": (("毛利率",), 1),
+    "F6": (("同比",), 1),
 }
+
+#: 触发词命中不足、但问题里出现了核验类词汇时，默认按资产恒等式处理。
+DEFAULT_VERIFY_FORMULA = "F1"
 
 
 def classify_intent(question: str) -> tuple[str, str | None]:
-    """返回 (route, formula_id)。"""
+    """返回 (route, formula_id)。
+
+    两步走，顺序不能反：
+
+    1. 先判断这题**要不要核验**。信号有两个：出现核验类词汇，或命中了一个
+       「自身就足够独特」的公式触发词（门槛为 1 的 F4 / F6）。
+       少了这一步，「2024年毛利率是多少」会被当成查科目 —— 而报表上根本没有
+       「毛利率」这一行，结局是召回失败，拒答原因指向检索层，指错了地方。
+    2. 再在通过门槛的公式里挑命中最多的那个；一个都没有才退回默认公式。
+
+    若把顺序反过来（先按词汇兜底成 F1），「净利润是否等于利润总额减去所得税费用」
+    会被兜底成 F1，于是**拿资产负债表的科目去算利润表的恒等式**，
+    一路走到 `MISSING_OPERANDS` 才失败 —— 失败得很晚，且原因指向错误的层。
+    """
     q = question or ""
-    if any(k in q for k in VERIFY_KEYWORDS) or "=" in q or "＋" in q or "+" in q:
-        for fid, hints in FORMULA_HINTS.items():
-            if sum(h in q for h in hints) >= 2:
-                return "VERIFY", fid
-        # 说了「平衡/勾稽」但没点名哪条公式，默认资产恒等式
-        return "VERIFY", "F1"
-    return "LOOKUP", None
+
+    hits: dict[str, int] = {
+        fid: sum(1 for w in words if w in q)
+        for fid, (words, _threshold) in FORMULA_HINTS.items()
+    }
+    met = [
+        fid
+        for fid, (words, threshold) in FORMULA_HINTS.items()
+        if hits[fid] >= threshold
+    ]
+    #: 门槛为 1 的公式，其触发词本身就是「这题在要一个派生量 / 一个判定」的信号。
+    distinctive = [
+        fid for fid in met if FORMULA_HINTS[fid][1] == 1
+    ]
+
+    verify_signal = (
+        any(k in q for k in VERIFY_KEYWORDS) or "=" in q or "＋" in q or "+" in q
+    ) or bool(distinctive)
+    if not verify_signal:
+        return "LOOKUP", None
+
+    if met:
+        # 命中数相同时按注册顺序取先出现的，保证结果可复现。
+        best = max(met, key=lambda fid: (hits[fid], -list(FORMULA_HINTS).index(fid)))
+        return "VERIFY", best
+    return "VERIFY", DEFAULT_VERIFY_FORMULA
 
 
 # --------------------------------------------------------------------------
@@ -343,21 +396,34 @@ class VeriFinAgent:
     @staticmethod
     def _absorb(node: str, result: Mapping[str, Any], state: dict[str, Any]) -> None:
         """把工具返回值落到状态里。只存结论，不存大对象。"""
+        if node == "EVIDENCE":
+            # 无论成败都要记「这个科目试过了」。
+            #
+            # 只在成功时记账，会让一个取不到值的候选被**无限重试**：
+            # `tried` 不更新 → `_next_candidate` 每次都返回同一个科目 →
+            # 兜底策略以为"还有下一条候选" → 直到工具预算烧光变 ABORT。
+            # 实测复现：候选「筹资活动现金流入小计」没有本期列，
+            # 被连续重试 8 次，最后报成「预算耗尽」——
+            # 真实原因是「候选不可用」，报出来的原因却指向预算，指错了排查方向。
+            attempted = result.get("requested_label")
+            if attempted:
+                tried = set(state.get("tried") or set())
+                tried.add(attempted)
+                state["tried"] = tried
+                state["has_more_candidates"] = (
+                    VeriFinAgent._next_candidate(state) is not None
+                )
+            if not result.get("ok"):
+                return
+            state["evidence"] = dict(result)
+            return
+
         if not result.get("ok"):
             return
         if node == "SEARCH":
             state["candidates"] = list(result.get("hits") or [])
             state["per_channel"] = result.get("per_channel") or {}
             state["has_more_candidates"] = bool(state["candidates"])
-        elif node == "EVIDENCE":
-            state["evidence"] = dict(result)
-            tried = set(state.get("tried") or set())
-            if result.get("requested_label"):
-                tried.add(result["requested_label"])
-            state["tried"] = tried
-            state["has_more_candidates"] = (
-                VeriFinAgent._next_candidate(state) is not None
-            )
         elif node == "VERIFY_SPAN":
             state["span"] = dict(result)
         elif node == "LOCATE":

@@ -344,5 +344,59 @@ class TestRegistry:
         assert outcome.detail.count("常见成因：") == 1
 
 
+class TestRequiredOperands:
+    """`required_operands`：哪些科目必须**从报表里取到**。
+
+    这一层的存在理由（D4 建题库时暴露）：`operand_names` 把左值也算进来，
+    而派生量的左值是我们要**求出来**的东西（F4 的「毛利率」），
+    报表上根本没有这一行。照 `operand_names` 取数，毛利率永远算不出来，
+    报错还说「缺科目：毛利率」—— 把「报表没有派生量行」说成了「数据缺失」。
+    """
+
+    def test_identity_formula_needs_every_row(self) -> None:
+        assert FORMULA_REGISTRY["F1"].required_operands == (
+            "资产总计",
+            "负债合计",
+            "所有者权益合计",
+        )
+
+    def test_derived_formula_excludes_the_derived_lhs(self) -> None:
+        required = FORMULA_REGISTRY["F4"].required_operands
+        assert required == ("营业收入", "营业成本")
+        assert "毛利率" not in required
+        assert "毛利率" in FORMULA_REGISTRY["F4"].operand_names
+
+    def test_gross_margin_computable_from_table_rows(self) -> None:
+        """端到端：只用报表上真实存在的两行，就能算出毛利率。"""
+        outcome = evaluate_formula(
+            "F4",
+            {
+                "营业收入": Decimal("170899152276.34"),
+                "营业成本": Decimal("13789482367.98"),
+            },
+            disclosure_unit="元",
+        )
+        assert outcome.verdict is Verdict.PASS
+        assert str(outcome.lhs) == "91.93"
+
+    def test_extra_operands_do_not_blow_up_the_evaluator(self) -> None:
+        """调用方多带一个键不得抛 `KeyError`。
+
+        早先 `evaluate_formula` 对 `operands` 里每个键都做 `param_map[name]`，
+        多一个键就抛异常 —— 把「多给了个操作数」炸成未捕获异常。
+        """
+        outcome = evaluate_formula(
+            "F4",
+            {
+                "毛利率": Decimal("0"),  # 非 param_map 里的键，应被忽略
+                "营业收入": Decimal("1000"),
+                "营业成本": Decimal("400"),
+            },
+            disclosure_unit="元",
+        )
+        assert outcome.verdict is Verdict.PASS
+        assert str(outcome.lhs) == "60.00"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

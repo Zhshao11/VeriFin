@@ -14,10 +14,7 @@ Agent 编排（D3）接入后，会在最前面补上意图解析与工具选择
 
 from __future__ import annotations
 
-import re
-import sqlite3
 import sys
-import threading
 import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -40,9 +37,8 @@ from verifin.agent import (  # noqa: E402
 from verifin.agent.planner import LLMPlanner  # noqa: E402
 from verifin.formulas import FORMULA_REGISTRY, evaluate_formula  # noqa: E402
 from verifin.geometry import open_pdf  # noqa: E402
-from verifin.retrieval import RetrievalIndex, build_chunks  # noqa: E402
 from verifin.span import verify_evidence  # noqa: E402
-from verifin.tables import stitch_file  # noqa: E402
+from verifin.runtime import build_document_runtime  # noqa: E402
 
 # --------------------------------------------------------------------------
 # 演示所用的一份真实年报
@@ -62,65 +58,31 @@ PERIOD = "2024 年度（2024-01-01 ~ 2024-12-31）"
 #: 这一条在页面上如实标注，不伪装成"已经解析出来了"。
 METADATA_SOURCE = "演示配置（封面结构化解析待接入）"
 
-#: 单位识别必须用**精确字典匹配**，不能用后缀包含判断。
-#: 原因（P-005）：报表里同时存在「编制单位:贵州茅台酒股份有限公司」与「单位:元 币种:人民币」，
-#: 任何宽松匹配都会先命中前者，把公司名当成货币单位，
-#: 而单位是容差推导的输入 —— 错了会让整张报表的核验结论失真。
-UNIT_RE = re.compile(r"单位\s*[:：]\s*(万元|百万元|千元|亿元|元)")
-
-
-def _detect_disclosure_unit() -> str:
-    """从解析产物里读报表披露单位。
-
-    单位是容差推导的输入（容差 = 科目数 × 0.5 × 披露单位），
-    不能靠猜，也不能硬编码成「元」。
-    """
-    candidates: list[Path] = []
-    if PRODUCT.is_dir():
-        candidates += sorted(PRODUCT.rglob("*.md"))[:20]
-    elif PRODUCT.exists():
-        candidates.append(PRODUCT)
-    stitched = ROOT / "data/parsed/moutai2024_fs_stitched.md"
-    if stitched.exists():
-        candidates.insert(0, stitched)
-
-    for path in candidates:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        hit = UNIT_RE.search(text)
-        if hit:
-            return hit.group(1)
-    return "元"
-
 
 # --------------------------------------------------------------------------
 # 启动期一次性装载
 # --------------------------------------------------------------------------
+#
+# 装配集中在 `verifin.runtime`，与命令行演示、评测执行器共用同一份 ——
+# 否则三处各写一遍，迟早各自漂移，评测量到的就不是网页上跑的那个系统。
 
-REPORT = stitch_file(PRODUCT)
-
-
-def _open_index():
-    """自建连接而不是用 `load_index`，因为要跨线程用。
-
-    SQLite 默认禁止连接跨线程。演示服务是单进程多线程，
-    所以显式开 `check_same_thread=False`，并用一把锁把访问串行化 ——
-    检索层本身不持有可变状态，串行化只影响吞吐，不影响正确性。
-    """
-    return RetrievalIndex(
-        sqlite3.connect(str(INDEX_DB), check_same_thread=False)
-    )
-
-
-INDEX = _open_index()
-INDEX_LOCK = threading.Lock()
-CHUNKS = build_chunks(REPORT.tables, DOC_ID)
-BY_LABEL: dict[str, object] = {}
-for _c in CHUNKS:
-    BY_LABEL.setdefault(_c.label, _c)
-DISCLOSURE_UNIT = _detect_disclosure_unit()
+DOC = build_document_runtime(
+    doc_id=DOC_ID,
+    product=PRODUCT,
+    index_db=INDEX_DB,
+    pdf=PDF,
+    stitched=ROOT / "data/parsed/moutai2024_fs_stitched.md",
+)
+REPORT = DOC.report
+CHUNKS = DOC.chunks
+BY_LABEL = DOC.by_label
+INDEX = DOC.index
+DISCLOSURE_UNIT = DOC.unit
+UNIT_SOURCE = DOC.unit_source
+#: 检索索引是共享可变资源，读也要串行化。
+#: `check_same_thread=False` 只是**允许**跨线程访问，不等于跨线程安全 ——
+#: 并发的 `execute` + `commit` 会事务交错。锁由 runtime 统一提供。
+INDEX_LOCK = DOC.index_lock
 ASSET_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="VeriFin Demo", version="0.1.0")
@@ -599,6 +561,7 @@ def meta() -> dict:
         "period": PERIOD,
         "metadata_source": METADATA_SOURCE,
         "disclosure_unit": DISCLOSURE_UNIT,
+        "disclosure_unit_source": UNIT_SOURCE,
         "doc_id": DOC_ID,
         "chunk_count": len(CHUNKS),
         "table_count": REPORT.table_count,
@@ -614,14 +577,10 @@ def meta() -> dict:
 
 AGENT_TRACE = TraceStore(ROOT / "data/index/agent_trace_web.db")
 
-AGENT_RUNTIME = ToolRuntime(
-    by_label=BY_LABEL,
-    index=INDEX,
-    unit=DISCLOSURE_UNIT,
+AGENT_RUNTIME = DOC.tool_runtime(
     company=COMPANY,
     period=PERIOD,
     pdf_open=lambda: open_pdf(PDF),
-    index_lock=INDEX_LOCK,
 )
 
 # LLM 客户端可以共享（无状态、贵在建连），但**调度器必须每次请求新建**：

@@ -171,8 +171,14 @@ class ToolRuntime:
         return None
 
 
-def _fail(code: str, detail: str) -> dict[str, Any]:
-    return {"ok": False, "error": code, "detail": detail}
+def _fail(code: str, detail: str, **extra: Any) -> dict[str, Any]:
+    """失败的返回值。`extra` 用来附上**调度器需要、但不能靠猜**的上下文。
+
+    目前唯一的用法是 `requested_label`：取行证据失败时，调度器要靠它把这个
+    科目记为「已尝试」，否则会反复重试同一个候选直到预算耗尽
+    （该缺陷由 D4 评测打出来，详见 `_absorb`）。
+    """
+    return {"ok": False, "error": code, "detail": detail, **extra}
 
 
 def _ok(**data: Any) -> dict[str, Any]:
@@ -258,14 +264,24 @@ def get_row_evidence(
     column = 0 if period == "current" else 1
     actual = rt.resolve(label)
     if actual is None:
-        return _fail("LABEL_NOT_FOUND", f"报表里没有科目「{label}」")
+        return _fail(
+            "LABEL_NOT_FOUND", f"报表里没有科目「{label}」", requested_label=label
+        )
     chunk = rt.by_label[actual]
     if len(chunk.values) <= column:
-        return _fail("COLUMN_MISSING", f"「{actual}」没有{'本期' if column == 0 else '上期'}列")
+        return _fail(
+            "COLUMN_MISSING",
+            f"「{actual}」没有{'本期' if column == 0 else '上期'}列",
+            requested_label=label,
+        )
     raw = chunk.values[column]
     value = _to_decimal(raw)
     if value is None:
-        return _fail("VALUE_UNPARSED", f"「{actual}」该列为空或无法解析：{raw!r}")
+        return _fail(
+            "VALUE_UNPARSED",
+            f"「{actual}」该列为空或无法解析：{raw!r}",
+            requested_label=label,
+        )
     return _ok(
         label=actual,
         requested_label=label,
@@ -358,7 +374,9 @@ def compute(rt: ToolRuntime, *, formula_id: str, period: str = "current") -> dic
     operands: dict[str, Decimal] = {}
     sources: list[dict[str, Any]] = []
     missing: list[str] = []
-    for name in formula.operand_names:
+    # 用 required_operands 而不是 operand_names：后者含左值，
+    # 对派生量公式（F4 毛利率）会去报表里找「毛利率」这一行，永远找不到。
+    for name in formula.required_operands:
         actual = rt.resolve(name)
         chunk = rt.by_label.get(actual) if actual else None
         if chunk is None or len(chunk.values) <= column:

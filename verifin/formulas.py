@@ -136,6 +136,22 @@ class Formula:
         return (self.lhs, *(name for name, _ in self.rhs))
 
     @property
+    def required_operands(self) -> tuple[str, ...]:
+        """**必须从报表里取到**的科目名。
+
+        带自定义求值器的公式以 `param_map` 为准 —— 那里的键才是求值器真正要的输入。
+
+        为什么不能直接用 :attr:`operand_names`：它把左值也算进来，而派生量的左值
+        是我们要求出来的东西（如 F4 的「毛利率」），报表上根本没有这一行。
+        用 `operand_names` 去取数，结果是「毛利率永远算不出来」，
+        且报错说「缺科目：毛利率」—— 把「报表没有派生量行」这个事实
+        说成了「数据缺失」，指错了排查方向。
+        """
+        if self.evaluator is not None and self.param_map:
+            return tuple(self.param_map)
+        return self.operand_names
+
+    @property
     def operand_count(self) -> int:
         """参与运算的科目数。容差按此推导。"""
         return 1 + len(self.rhs)
@@ -666,6 +682,11 @@ def evaluate_formula(
             detail=f"缺少科目：{'、'.join(missing)}，无法核验。",
         )
 
-    translated = {param_map[name]: value for name, value in operands.items()}
+    # 只翻译 param_map 里列出的科目。多余的键（如调用方顺手带上的左值）
+    # 直接忽略 —— 早先这里是 `param_map[name]`，多带一个键就 KeyError，
+    # 把「调用方多给了个操作数」炸成「未捕获异常」。
+    translated = {
+        param_map[name]: value for name, value in operands.items() if name in param_map
+    }
     translated.update(kwargs)
     return formula.evaluator(**translated)
