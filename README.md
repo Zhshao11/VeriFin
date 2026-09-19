@@ -34,6 +34,7 @@
 - 🔥 [最近更新](#-最近更新)
 - 🌟 [核心特性](#-核心特性)
 - 🔎 [系统架构](#-系统架构)
+- 📁 [目录结构](#-目录结构)
 - 🔧 [配置](#-配置)
 - 🧪 [验证方式](#-验证方式)
 - 📚 [文档索引](#-文档索引)
@@ -125,6 +126,27 @@ cp .env.example .env
 .venv/bin/python scripts/parse_mineru_md.py     # MinerU 解析 + 恒等式自检
 .venv/bin/python scripts/check_llm.py           # 探测端点能力（工具调用 / 结构化输出）
 ```
+
+### 🖥️ Web 演示页
+
+```bash
+.venv/bin/python -m uvicorn web.server:app --port 8765
+# 打开 http://127.0.0.1:8765
+```
+
+页面把上面那条链路摊开给人看，共五块：
+
+| 区块 | 展示什么 |
+|---|---|
+| 提问与执行轨迹 | 每个阶段的状态灯都是程序判定：四路召回 → RRF 融合 → 证据选取 → span 校验 → 坐标定位 → 六元组 |
+| 六元组与证据 | 六字段 + 原文片段 + **PDF 证据特写图**（坐标层裁剪放大，人工复核用） |
+| 四路召回明细 | 每条候选命中了哪几路、各路名次、RRF 分 |
+| 防幻觉演示台 | 同一条证据喂三次：真实值（采纳）/ 篡改值（拦截）/ 伪造片段（拦截） |
+| 勾稽核验 | 资产 = 负债 + 所有者权益，本期与上期双列，给出差额与推导出的容差 |
+
+> [!NOTE]
+> 演示页跑的是**确定性路径**，不经 LLM —— 它要证明的正是「每个数字都有确定性来源」。
+> Agent 编排（D3）接入后会在最前面补上意图解析与工具选择，但数值、算术、拒答判定永远走确定性代码。
 
 ---
 
@@ -252,6 +274,39 @@ flowchart TD
 
 ---
 
+## 📁 目录结构
+
+```
+VeriFin/
+├── verifin/
+│   ├── normalize.py      # 数字/文本归一化（stdlib，无第三方依赖）
+│   ├── span.py           # span 硬校验 —— 防幻觉核心（stdlib）
+│   ├── compute.py        # Decimal 计算原语（stdlib）
+│   ├── formulas.py       # 勾稽公式注册表 + 容差推导（stdlib）
+│   ├── tables.py         # 表格抽取 + 跨页拼接（HTML 表 / markdown 管道表 双路）
+│   ├── geometry.py       # PyMuPDF 坐标层：容错定位 + 同行校验 + 高亮导出
+│   ├── lexicon.py        # 财务专用词典（jieba 不认识会计科目，必须注入）
+│   ├── retrieval.py      # 四路检索 + RRF 融合 + 可插拔 Embedder
+│   ├── models.py         # Pydantic 数据模型 + JSON Schema
+│   └── llm.py            # OpenAI 兼容客户端，带结构化输出降级
+├── web/
+│   ├── server.py         # 演示服务：确定性链路的 HTTP 封装（FastAPI）
+│   └── index.html        # 演示页：轨迹 / 六元组 / 证据特写 / 防幻觉 / 勾稽
+├── scripts/
+│   ├── demo_core.py      # 端到端：抽取 → span 校验 → 勾稽核验 → 拒答
+│   ├── demo_evidence.py  # 全链路：解析 → 检索 → 坐标定位 → 高亮图
+│   ├── parse_mineru_md.py# MinerU 解析 + 恒等式自检
+│   ├── bootstrap_env.sh  # 环境引导（含 pip sdist 绕行）
+│   └── check_llm.py      # 端点能力探测
+├── tests/                # 156 项测试
+└── docs/                 # 选型 / 缺陷留档 / 接手入口
+```
+
+**一个刻意的设计**：`normalize` / `span` / `compute` / `formulas` 四个核心模块**只依赖 Python 标准库**。
+核验规则可以脱离 LLM、脱离解析层单独测试 —— 即使模型服务或解析器不可用，判定逻辑依然可验证。
+
+---
+
 ## 🔧 配置
 
 `.env` 只需要三个变量，任何 OpenAI 兼容端点都可以：
@@ -298,7 +353,7 @@ LLM_MODEL=your-model-name
 |---|---|
 | `docs/项目上下文速览-v1.0.md` | 新会话接手入口：模块清单、已知缺陷、下一步 |
 | `docs/技术选型-v1.1.md` | 选型的唯一权威来源，含每层候选对比与实测依据 |
-| `docs/技术问题留档.md` | P-001 ~ P-011：跨页表格、附注列、端点无 embedding 等的设计级缺陷归档 |
+| `docs/技术问题留档.md` | P-001 ~ P-012：跨页表格、附注列、端点无 embedding、科目名口径等的设计级缺陷归档 |
 | `docs/开源底座选型与二次开发方案-v0.1.md` | 开源平台调研：为何不整体 fork RAGFlow / Dify / QAnything |
 | `docs/财报核验Agent-方案设计-v0.1.md` | 原始方案设计 |
 

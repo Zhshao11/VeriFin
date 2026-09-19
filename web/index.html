@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VeriFin · 财报核验 Agent 演示</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --ink:#12181f; --muted:#5c6b7a;
+  --line:#e3e7ec; --brand:#1f4e79; --brand-soft:#eaf1f8;
+  --ok:#1a7f4b; --ok-bg:#e7f6ed; --warn:#9a6700; --warn-bg:#fdf3e0;
+  --fail:#b42318; --fail-bg:#fdeceb; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+header{background:#0f2740;color:#fff;padding:18px 28px;display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+header h1{margin:0;font-size:22px;letter-spacing:.5px}
+header .tag{color:#9dc0e0;font-size:14px}
+header .meta{margin-left:auto;font-size:12px;color:#8fb0cf;font-family:var(--mono)}
+main{max-width:1240px;margin:0 auto;padding:24px 20px 60px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:20px 22px;margin-bottom:20px}
+h2{font-size:16px;margin:0 0 14px;padding-bottom:10px;border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:10px}
+h2 .n{font-family:var(--mono);font-size:12px;color:var(--muted);font-weight:600}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+label{font-size:13px;color:var(--muted);display:block;margin-bottom:6px}
+textarea,input[type=text]{width:100%;padding:10px 12px;border:1px solid var(--line);
+  border-radius:8px;font-size:15px;font-family:inherit;resize:vertical}
+button{background:var(--brand);color:#fff;border:0;border-radius:8px;padding:10px 18px;
+  font-size:14px;cursor:pointer;font-family:inherit}
+button:hover{background:#163c5c}
+button.ghost{background:transparent;color:var(--brand);border:1px solid var(--line)}
+button.ghost:hover{background:var(--brand-soft)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.chip{background:var(--brand-soft);border:1px solid #d3e2f0;color:var(--brand);
+  border-radius:999px;padding:5px 13px;font-size:13px;cursor:pointer}
+.chip:hover{background:#dceafa}
+.chip.danger{background:var(--fail-bg);border-color:#f5cecb;color:var(--fail)}
+.stage{display:flex;gap:12px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:14px}
+.stage:last-child{border-bottom:0}
+.dot{width:9px;height:9px;border-radius:50%;margin-top:8px;flex:none;background:var(--muted)}
+.dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.fail{background:var(--fail)}
+.stage .nm{font-weight:600;flex:none;width:88px}
+.stage .dt{color:var(--muted);font-size:13.5px}
+.banner{border-radius:8px;padding:14px 16px;margin-bottom:14px;font-weight:600;font-size:15px}
+.banner.answer{background:var(--ok-bg);color:var(--ok);border:1px solid #bfe3cd}
+.banner.refuse{background:var(--fail-bg);color:var(--fail);border:1px solid #f3c7c3}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;width:88px;white-space:nowrap}
+td.v{font-family:var(--mono)}
+blockquote{margin:10px 0 0;padding:10px 14px;background:#f3f6f8;border-left:3px solid var(--brand);
+  border-radius:0 6px 6px 0;font-family:var(--mono);font-size:13px;word-break:break-all}
+.badge{display:inline-block;border-radius:5px;padding:2px 8px;font-size:12px;
+  font-family:var(--mono);margin-right:5px}
+.badge.label{background:#eef2ff;color:#3f51b5}
+.badge.lexical{background:#eaf6f0;color:#1a7f4b}
+.badge.numeric{background:#fdf0e6;color:#a4571a}
+.badge.vector{background:#f3e9fb;color:#7b3fb5}
+.empty{color:var(--muted);font-size:13px;font-style:italic}
+img.evidence{width:100%;border:1px solid var(--line);border-radius:8px;margin-top:10px;
+  background:#fff;display:block}
+.cand{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+.cand:last-child{border-bottom:0}
+.cand .rank{font-family:var(--mono);color:var(--muted);width:22px;flex:none}
+.cand .lb{flex:1}
+.cand .val{font-family:var(--mono);font-size:13px}
+.foot{color:var(--muted);font-size:12.5px}
+.kv{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-bottom:12px}
+.kv b{color:var(--ink);font-family:var(--mono)}
+.case{border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:10px}
+.case .hd{display:flex;align-items:center;gap:10px;font-weight:600;font-size:14px}
+.case .note{color:var(--muted);font-size:12.5px;margin-top:4px}
+.pill{font-size:12px;border-radius:999px;padding:3px 10px;font-family:var(--mono)}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}
+.pill.fail{background:var(--fail-bg);color:var(--fail)}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid #fff3;border-top-color:#fff;
+  border-radius:50%;animation:r .7s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes r{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>VeriFin</h1>
+  <span class="tag">每个数字都能点回原文页码的财报核验 Agent</span>
+  <span class="meta" id="metaBox">装载中…</span>
+</header>
+
+<main>
+  <!-- ① 提问 -->
+  <section>
+    <h2><span class="n">01</span> 提问</h2>
+    <div class="grid">
+      <div>
+        <label for="q">输入一个关于年报的问题（确定性路径，不经 LLM）</label>
+        <textarea id="q" rows="3">2024年营业收入是多少</textarea>
+        <div style="margin-top:12px;display:flex;gap:10px">
+          <button id="askBtn" onclick="ask()">核验</button>
+          <button class="ghost" onclick="askRefuse()">试一个必拒答的问题</button>
+        </div>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div>
+        <label>执行轨迹（每一步的状态都是程序判定，不是模型自述）</label>
+        <div id="trace"><p class="empty">点击「核验」后显示。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ② 结论 -->
+  <section>
+    <h2><span class="n">02</span> 六元组与证据</h2>
+    <div id="verdict"><p class="empty">尚无结果。</p></div>
+  </section>
+
+  <!-- ③ 召回明细 -->
+  <section>
+    <h2><span class="n">03</span> 四路召回明细（RRF 融合前）</h2>
+    <div class="kv" id="channels"></div>
+    <div id="candidates"><p class="empty">尚无候选。</p></div>
+  </section>
+
+  <!-- ④ 防幻觉 -->
+  <section>
+    <h2><span class="n">04</span> 防幻觉演示台：同一条证据喂三次</h2>
+    <p class="foot" style="margin-top:0">span 硬校验有两层关卡：① 片段在不在原文里；② 数值能不能从这个片段解析出来。
+      第二例最危险 —— 片段是真的，数值是假的，只做第一层会放行。</p>
+    <div style="margin:12px 0"><button class="ghost" onclick="guard()">跑一次拦截演示</button></div>
+    <div id="guardBox"><p class="empty">尚未运行。</p></div>
+  </section>
+
+  <!-- ⑤ 勾稽 -->
+  <section>
+    <h2><span class="n">05</span> 勾稽核验：资产 = 负债 + 所有者权益</h2>
+    <p class="foot" style="margin-top:0">容差由披露单位推导：科目数 × 0.5 × 披露单位。不硬编码 0.01。</p>
+    <div style="margin:12px 0;display:flex;gap:10px">
+      <button class="ghost" onclick="identity('current')">核验本期</button>
+      <button class="ghost" onclick="identity('prior')">核验上期</button>
+    </div>
+    <div id="identityBox"><p class="empty">尚未运行。</p></div>
+  </section>
+
+  <p class="foot">
+    已知限制：公司名与期间目前来自演示配置（封面结构化解析待接入）；向量通道走本地 TF-IDF（端点无 embedding 能力）；
+    坐标层依赖 PDF 内嵌文本层，扫描版 PDF 需先接 OCR。
+  </p>
+</main>
+
+<script>
+const EXAMPLES = [
+  "2024年资产总计是多少",
+  "负债合计",
+  "2024年营业收入是多少",
+  "242,011,315,120.60",
+  "2024年营业成本",
+];
+// 这条查询四路均无命中（实跑确认：label/lexical/numeric/vector 全 0），
+// 用来演示「无证据即拒答」，而不是演示检索不准。
+const REFUSE_EXAMPLE = "火星基地折旧年限";
+
+function chips(){
+  const box = document.getElementById('chips');
+  box.innerHTML = '';
+  EXAMPLES.forEach(t=>{
+    const b=document.createElement('button');
+    b.className='chip'; b.textContent=t; b.onclick=()=>{document.getElementById('q').value=t; ask();};
+    box.appendChild(b);
+  });
+  const d=document.createElement('button');
+  d.className='chip danger'; d.textContent='必拒答：'+REFUSE_EXAMPLE;
+  d.onclick=()=>{document.getElementById('q').value=REFUSE_EXAMPLE; ask();};
+  box.appendChild(d);
+}
+
+async function meta(){
+  const r = await fetch('/api/meta'); const m = await r.json();
+  document.getElementById('metaBox').textContent =
+    `${m.company} · ${m.period} · 披露单位 ${m.disclosure_unit} · ${m.chunk_count} chunks / ${m.table_count} 表 · 向量 ${m.embedder}`;
+}
+
+function stageHtml(trace){
+  return trace.map(s=>`<div class="stage"><span class="dot ${s.status}"></span>
+    <span class="nm">${s.stage}</span><span class="dt">${esc(s.detail)}</span></div>`).join('');
+}
+
+function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+async function ask(){
+  const q = document.getElementById('q').value.trim();
+  if(!q) return;
+  const btn=document.getElementById('askBtn');
+  btn.disabled=true; btn.innerHTML='<span class="spin"></span>核验中';
+  document.getElementById('trace').innerHTML='<p class="empty">运行中…</p>';
+  try{
+    const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:q})});
+    const d=await r.json();
+    document.getElementById('trace').innerHTML=stageHtml(d.trace);
+    renderVerdict(d); renderChannels(d); renderCandidates(d);
+  }catch(e){
+    document.getElementById('verdict').innerHTML='<p class="empty">请求失败：'+e+'</p>';
+  }finally{ btn.disabled=false; btn.textContent='核验'; }
+}
+
+function askRefuse(){
+  document.getElementById('q').value=REFUSE_EXAMPLE; ask();
+}
+
+function renderChannels(d){
+  const pc=d.per_channel||{};
+  document.getElementById('channels').innerHTML =
+    Object.entries(pc).map(([k,v])=>`<span><b>${k}</b> ${v} 条</span>`).join('') ||
+    '<span class="empty">无</span>';
+}
+
+function renderCandidates(d){
+  const box=document.getElementById('candidates');
+  const cs=d.candidates||[];
+  if(!cs.length){box.innerHTML='<p class="empty">无候选（四路均未命中）。</p>';return;}
+  box.innerHTML=cs.map((c,i)=>`<div class="cand">
+    <span class="rank">#${i+1}</span>
+    <span class="lb">${esc(c.label)}
+      <div>${(c.via||[]).map(v=>`<span class="badge ${v}">${v}</span>`).join('')||'<span class="empty">无通道</span>'}</div></span>
+    <span class="val">${esc(c.value||'—')}<div class="foot">p${c.page} · RRF ${c.score}</div></span>
+  </div>`).join('');
+}
+
+function renderVerdict(d){
+  const box=document.getElementById('verdict');
+  if(d.decision==='refuse'){
+    box.innerHTML=`<div class="banner refuse">拒答 · ${esc(d.refuse_reason)}</div>
+      <p style="margin:0">${esc(d.refuse_detail)}</p>
+      <p class="foot" style="margin-top:10px">拒答是程序级判定：模型没有否决权。</p>`;
+    return;
+  }
+  const s=d.six_tuple||{}; const g=d.geometry||{};
+  box.innerHTML=`<div class="banner answer">通过校验 · 已给出带溯源的数字</div>
+    <div class="grid">
+      <div>
+        <table>${Object.entries(s).map(([k,v])=>
+          `<tr><th>${k}</th><td class="v">${esc(v)}</td></tr>`).join('')}</table>
+        <p class="foot">公司 / 期间 来源：${esc(d.metadata_source||'—')} · span 命中方式：${esc(d.span_mode||'—')}</p>
+      </div>
+      <div>
+        <label>原文片段（span 硬校验逐字比对的对象）</label>
+        <blockquote>${esc(d.fragment)}</blockquote>
+        <label style="margin-top:12px">PDF 证据特写${g.verified?' · 同行校验通过':' · 未通过同行校验'}</label>
+        ${g.image?`<img class="evidence" src="${g.image}" alt="证据高亮">`
+                 :'<p class="empty">未定位到坐标，不展示高亮图。</p>'}
+        ${g.bbox?`<p class="foot">第 ${g.page} 页 · PDF point ${esc(JSON.stringify(g.bbox))}</p>`:''}
+      </div>
+    </div>`;
+}
+
+async function guard(){
+  const q=document.getElementById('q').value.trim()||EXAMPLES[2];
+  document.getElementById('guardBox').innerHTML='<p class="empty">运行中…</p>';
+  const r=await fetch('/api/guard',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({question:q,perturbation:'10000000'})});
+  const d=await r.json();
+  if(!d.cases||!d.cases.length){
+    document.getElementById('guardBox').innerHTML='<p class="empty">'+esc(d.note||'无结果')+'</p>';return;
+  }
+  document.getElementById('guardBox').innerHTML=
+    `<div class="kv"><span>科目：<b>${esc(d.label)}</b></span><span>页码：<b>p${d.page}</b></span>
+      <span>真实值：<b>${esc(d.true_value)}</b></span></div>`+
+    d.cases.map(c=>`<div class="case">
+      <div class="hd">${esc(c.title)}
+        <span class="pill ${c.accepted?'ok':'fail'}">${c.accepted?'采纳':'拦截'}</span>
+        ${c.reason?`<span class="foot">${esc(c.reason)}</span>`:''}</div>
+      <div class="note">${esc(c.note)}</div>
+      <div class="note">声称片段：<code>${esc(c.claimed_span)}</code></div>
+      <div class="note">声称数值：<code>${esc(c.claimed_value)}</code></div>
+      <div class="note">判定：${esc(c.detail)}</div>
+    </div>`).join('');
+}
+
+async function identity(period){
+  document.getElementById('identityBox').innerHTML='<p class="empty">运行中…</p>';
+  const r=await fetch('/api/identity?period='+period,{method:'POST'});
+  const d=await r.json();
+  const box=document.getElementById('identityBox');
+  if(!d.available){box.innerHTML='<p class="empty">'+esc(d.detail)+'</p>';return;}
+  const cls=d.verdict==='PASS'?'ok':(d.verdict==='WARN'?'warn':'fail');
+  const pillCls=d.verdict==='PASS'?'ok':'fail';
+  box.innerHTML=`<div class="kv">
+      <span>结论：<span class="pill ${pillCls}">${d.verdict}</span></span>
+      <span>左值：<b>${esc(d.lhs)}</b></span>
+      <span>右值合计：<b>${esc(d.rhs)}</b></span>
+      <span>差额：<b>${esc(d.diff)}</b></span>
+      <span>容差：<b>±${esc(d.tolerance)}</b></span>
+      <span>披露单位：<b>${esc(d.disclosure_unit)}</b></span>
+    </div>
+    <table>${d.sources.map(s=>`<tr><th>${esc(s['科目'])}</th>
+      <td class="v">${esc(s['值'])}<div class="foot">报表行名 ${esc(s['报表行名']||'—')} · p${s['页码']}</div></td></tr>`).join('')}</table>
+    <p class="foot" style="margin-top:10px">${esc(d.detail)}</p>`;
+}
+
+chips(); meta();
+</script>
+</body>
+</html>

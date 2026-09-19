@@ -20,6 +20,9 @@ blobs/
 # 如需把项目上下文也版本化，删掉下一行即可
 .workbuddy/
 
+# 演示服务生成的证据高亮图（每次查询都会重新生成）
+web/assets/
+
 # 数据与产物（体积大，不入仓库）
 data/pdfs/*.pdf
 data/parsed/
