@@ -558,3 +558,102 @@ def test_gold_check_flags_a_wrong_page() -> None:
     assert broken.item_id in checks
     # 第 1 页是封面，不含报表数值；G1/G3 至少有一道必须拦下。
     assert not checks[broken.item_id].ok
+
+
+# --------------------------------------------------------------------------
+# 成本指标（token 用量）
+# --------------------------------------------------------------------------
+
+
+class TestUsageAccounting:
+    """成本指标的账要算对：**差分**采集、零调用时不为零除。
+
+    LLM 客户端的 `calls` 是跨题累加的，只有 planner 的预算按运行重置。
+    如果直接读累计值，第二题起就会把前面所有题重新算一遍 ——
+    这是 P-015 那类"作用域写错了但看起来没问题"的坑，必须在测试里钉住。
+    """
+
+    def test_probe_diffs_between_questions(self):
+        from verifin.eval.run_eval import _usage_probe
+
+        class FakeClient:
+            def __init__(self):
+                self.n = 0
+                self.p = 0
+                self.c = 0
+
+            def usage_summary(self):
+                return {
+                    "calls": self.n,
+                    "prompt_tokens": self.p,
+                    "completion_tokens": self.c,
+                }
+
+        class FakePlanner:
+            def __init__(self):
+                self._client = FakeClient()
+
+        p = FakePlanner()
+        read = _usage_probe(p)
+
+        before = read()
+        p._client.n, p._client.p, p._client.c = 2, 1200, 80
+        after = read()
+
+        assert after["calls"] - before["calls"] == 2
+        assert after["prompt_tokens"] - before["prompt_tokens"] == 1200
+        assert after["completion_tokens"] - before["completion_tokens"] == 80
+
+    def test_probe_without_planner_returns_zero(self):
+        from verifin.eval.run_eval import _usage_probe
+
+        got = _usage_probe(None)()
+        assert got == {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+
+    def test_zero_llm_run_does_not_divide_by_zero(self):
+        """全零调用时，平均 tokens 不能抛 ZeroDivisionError。"""
+        from verifin.eval.run_eval import EvalReport, ItemResult
+
+        rep = EvalReport(planner="policy")
+        rep.results.append(
+            ItemResult(
+                item_id="X-1", question="q", question_type="L1", scope="合并",
+                expected="ANSWER", decision="ANSWER", route="LOOKUP", passed=True,
+            )
+        )
+        s = rep.stats()
+        assert s["LLM 调用数"] == 0
+        assert s["total_tokens"] == 0
+        assert s["平均每题tokens"] == 0.0
+        assert "0 次 LLM 调用" in s["单次查询成本"]
+        assert not any(
+            isinstance(s[k], float) and s[k] != s[k] for k in s
+        ), "出现了 NaN"
+
+    def test_per_question_average_uses_only_billed_runs(self):
+        """平均每题 tokens 的分母是**有调用的题**，不是总题数。
+
+        用总题数当分母会把"没走 LLM 的题"也算进去，把成本显得更低 ——
+        这是成本估算里最容易犯的错，会让预算判断偏乐观。
+        """
+        from verifin.eval.run_eval import EvalReport, ItemResult
+
+        rep = EvalReport(planner="llm")
+        rep.results.append(
+            ItemResult(
+                item_id="A", question="q", question_type="L1", scope="合并",
+                expected="ANSWER", decision="ANSWER", route="LOOKUP", passed=True,
+                llm_calls=2, prompt_tokens=1000, completion_tokens=100,
+            )
+        )
+        rep.results.append(
+            ItemResult(
+                item_id="B", question="q", question_type="R", scope="不适用",
+                expected="REFUSE", decision="REFUSE", route="LOOKUP", passed=True,
+            )
+        )
+        s = rep.stats()
+        assert s["LLM 调用数"] == 2
+        assert s["total_tokens"] == 1100
+        # 1100 / 1 题（只有 A 有调用），不是 1100 / 2
+        assert s["平均每题tokens"] == 1100.0

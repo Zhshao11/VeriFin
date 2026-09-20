@@ -20,13 +20,16 @@
 
 from verifin.agent.graph import (
     GRAPH,
+    MAX_QUESTION_CHARS,
     Budget,
+    InputError,
     NodeSpec,
     RunResult,
     Step,
     VeriFinAgent,
     classify_intent,
     render_graph_text,
+    validate_question,
 )
 from verifin.agent.planner import LLMPlanner, Decision, policy_decide
 from verifin.agent.tools import (
@@ -40,13 +43,16 @@ from verifin.agent.trace import TraceStore
 
 __all__ = [
     "GRAPH",
+    "MAX_QUESTION_CHARS",
     "Budget",
+    "InputError",
     "NodeSpec",
     "RunResult",
     "Step",
     "VeriFinAgent",
     "classify_intent",
     "render_graph_text",
+    "validate_question",
     "LLMPlanner",
     "Decision",
     "policy_decide",

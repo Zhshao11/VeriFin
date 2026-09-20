@@ -85,6 +85,12 @@ class ItemResult:
     """端到端耗时（毫秒），含检索 / 校验 / 坐标全部动作。"""
     evidence_recalled: bool = False
     """检索层是否真的召回了候选证据（SEARCH 命中非空 / DIFF 取数成功）。"""
+    llm_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    """LLM 用量。**由端点回报的 usage 字段累加，不是估算**。
+    成本指标的分母在这里；换算成钱要乘单价，而单价随厂商与时间变动，
+    故不写进代码（红线上限），只在报告层带查询日期记录。"""
 
     @property
     def degraded(self) -> bool:
@@ -113,6 +119,9 @@ class ItemResult:
             "run_id": self.run_id,
             "latency_ms": round(self.latency_ms, 1),
             "evidence_recalled": self.evidence_recalled,
+            "llm_calls": self.llm_calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
         }
 
 
@@ -327,6 +336,11 @@ class EvalReport:
             r for r in answerable if r.evidence_recalled
         ]
 
+        total_prompt = sum(r.prompt_tokens for r in self.results)
+        total_completion = sum(r.completion_tokens for r in self.results)
+        total_llm_calls = sum(r.llm_calls for r in self.results)
+        billed = [r for r in self.results if r.llm_calls > 0]
+
         def _pctl(xs: list[float], p: float) -> float:
             if not xs:
                 return 0.0
@@ -356,6 +370,21 @@ class EvalReport:
             "证据召回率": (
                 f"{len(recalled_answerable)}/{len(answerable)}"
                 if answerable else "—"
+            ),
+            "LLM 调用数": total_llm_calls,
+            "prompt_tokens": total_prompt,
+            "completion_tokens": total_completion,
+            "total_tokens": total_prompt + total_completion,
+            "平均每题tokens": (
+                round((total_prompt + total_completion) / len(billed), 1)
+                if billed else 0.0
+            ),
+            "单次查询成本": (
+                "—（本次 0 次 LLM 调用，成本为 0；"
+                "价格换算须带单价查询日期，见 docs/评测基线）"
+                if not billed else
+                f"{round((total_prompt + total_completion) / len(billed), 1)} tokens/次"
+                "（单价见报告，不在此处硬编）"
             ),
         }
 
@@ -394,6 +423,9 @@ class EvalReport:
             f"，含兜底步的运行 {s['含兜底步的运行数']} 次",
             f"端到端耗时 P50/P95：{s['端到端耗时P50_ms']} / {s['端到端耗时P95_ms']} ms",
             f"证据召回率：{s['证据召回率']}",
+            f"LLM 用量：{s['LLM 调用数']} 次调用，"
+            f"{s['prompt_tokens']} + {s['completion_tokens']} = {s['total_tokens']} tokens"
+            f"（{s['单次查询成本']}）",
         ]
         return "\n".join(lines)
 
@@ -436,12 +468,18 @@ def run_bank(
         use_llm=llm_planner is not None,
     )
     report = EvalReport(planner=planner)
+    usage = _usage_probe(llm_planner)
     for item in items:
         import time
 
+        # LLM 客户端的 calls 列表是**跨题累加**的（只有 planner 的预算按运行重置），
+        # 所以必须按题做差分，否则第二题起 token 数会把前面所有题都算进来 ——
+        # 这正是 P-015 那类"看起来没效果、其实是作用域错了"的坑。
+        before = usage()
         t0 = time.perf_counter()
         result = agent.run(item.question)
         dt_ms = (time.perf_counter() - t0) * 1000.0
+        after = usage()
         r = compare(item, result)
         r.latency_ms = dt_ms
         r.evidence_recalled = any(
@@ -451,8 +489,35 @@ def run_bank(
             )
             for s in result.steps
         )
+        r.llm_calls = after["calls"] - before["calls"]
+        r.prompt_tokens = after["prompt_tokens"] - before["prompt_tokens"]
+        r.completion_tokens = after["completion_tokens"] - before["completion_tokens"]
         report.results.append(r)
     return report
+
+
+def _usage_probe(llm_planner: Any | None):
+    """返回一个读取当前累计用量的闭包。
+
+    没有 LLM 时返回常量零 —— 让调用方不必到处判空。
+    """
+    client = getattr(llm_planner, "_client", None)
+    if client is None or not hasattr(client, "usage_summary"):
+
+        def _zero() -> dict[str, int]:
+            return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+
+        return _zero
+
+    def _read() -> dict[str, int]:
+        summary = client.usage_summary()
+        return {
+            "calls": int(summary.get("calls", 0)),
+            "prompt_tokens": int(summary.get("prompt_tokens", 0)),
+            "completion_tokens": int(summary.get("completion_tokens", 0)),
+        }
+
+    return _read
 
 
 def main(argv: list[str] | None = None) -> int:

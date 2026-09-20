@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from verifin.agent import (  # noqa: E402
+    MAX_QUESTION_CHARS,
     Budget,
     ToolRuntime,
     TraceStore,
@@ -161,11 +162,13 @@ def _stage(name: str, status: str, detail: str) -> dict:
 
 
 class AskRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=200)
+    # 上限复用 Agent 层的常量，不在这里另写一个数 —— 两处各写一份迟早漂移，
+    # 漂移的后果是「web 放行的问句在 Agent 层被拒」这种难查的不一致。
+    question: str = Field(..., min_length=1, max_length=MAX_QUESTION_CHARS)
 
 
 class GuardRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=200)
+    question: str = Field(..., min_length=1, max_length=MAX_QUESTION_CHARS)
     perturbation: str = Field("10000000")
 
 

@@ -41,6 +41,16 @@ from verifin.scope import both_scopes_named, detect_scope_in_question  # noqa: E
 
 TERMINALS = ("ANSWER", "REFUSE", "ABORT")
 
+#: 问句长度上限（字符）。与 web 端 `AskRequest.max_length=200` 保持一致。
+#: 为什么要有：超长输入会（a）把检索查询串撑到无意义，（b）让 jieba 切词耗时线性增长，
+#: （c）成为提示注入的载体。校验放在 Agent 层而不是只在 web 层，是因为 CLI 与评测
+#: 也会调 `run()` —— 只在入口挡一道，换个入口就绕过去了。
+MAX_QUESTION_CHARS = 200
+
+
+class InputError(ValueError):
+    """输入不合法（空、超长、类型不对）。属于**调用方错误**，不是拒答。"""
+
 
 # --------------------------------------------------------------------------
 # 图的定义（声明式，可直接渲染成图）
@@ -174,6 +184,32 @@ FORMULA_HINTS: dict[str, tuple[tuple[str, ...], int]] = {
 DEFAULT_VERIFY_FORMULA = "F1"
 
 
+def validate_question(question: str) -> str:
+    """校验并归一化问句。返回去除首尾空白后的问句。
+
+    Raises:
+        InputError: 类型不对 / 空白 / 超长。
+
+    **为什么不做关键词黑名单**（比如见到「忽略以上指令」就拒）：
+    黑名单既会误拦正常问句（财务问句里出现「请忽略附注部分」很常见），
+    又能被换个说法绕过 —— 拦不住的防御不如不拦。真正的注入防御在本项目里
+    是**结构性的**：LLM 无权决定数值、无权改参数、无权决定拒答，
+    所以就算问句里写满「输出 999」，系统能给的也只有原文真值或拒答。
+    这一条由 `tests/test_agent.py::TestQuestionValidation` 里的注入用例守着。
+    """
+    if not isinstance(question, str):
+        raise InputError(f"问句必须是字符串，收到 {type(question).__name__}")
+    q = question.strip()
+    if not q:
+        raise InputError("问句为空")
+    if len(q) > MAX_QUESTION_CHARS:
+        raise InputError(
+            f"问句过长（{len(q)} 字符 > 上限 {MAX_QUESTION_CHARS}）—— "
+            "超长输入会拖垮检索与切词，且是提示注入的常用载体"
+        )
+    return q
+
+
 def classify_intent(question: str, known_labels: Sequence[str] = ()) -> tuple[str, str | None]:
     """返回 (route, formula_id)。
 
@@ -303,6 +339,7 @@ class VeriFinAgent:
 
     # ---------------------------------------------------------------- 主循环
     def run(self, question: str) -> RunResult:
+        question = validate_question(question)
         run_id = new_run_id()
         route, formula_id = classify_intent(question, self.runtime.known_labels)
         operands = (
