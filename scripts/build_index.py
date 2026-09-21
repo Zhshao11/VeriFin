@@ -47,7 +47,7 @@ def main() -> int:
     con = create_index(db, chunks)
     con.close()
 
-    print(f"索引已重建：{db.relative_to(ROOT)}")
+    print(f"索引已重建：{db}")
     print(f"  逻辑表 {len(report.tables)} 张，chunk {len(chunks)} 条")
 
     # 口径分布必须打出来核对。**它是本脚本存在的第二个理由**：

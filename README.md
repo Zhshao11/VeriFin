@@ -121,7 +121,7 @@ cp .env.example .env
 其他入口：
 
 ```bash
-.venv/bin/python -m pytest                      # 242 项测试
+.venv/bin/python -m pytest                      # 295 项测试
 .venv/bin/python scripts/demo_core.py           # 抽取 → span 校验 → 勾稽核验 → 拒答
 .venv/bin/python scripts/demo_agent.py          # Agent 端到端（加 --llm 用 LLM 做调度）
 .venv/bin/python scripts/parse_mineru_md.py     # MinerU 解析 + 恒等式自检
@@ -421,7 +421,7 @@ VeriFin/
 │   ├── bootstrap_env.sh  # 环境引导（含 pip sdist 绕行）
 │   └── check_llm.py      # 端点能力探测
 ├── data/eval/            # 评测题库（JSONL）
-├── tests/                # 242 项测试
+├── tests/                # 295 项测试
 └── docs/                 # 选型 / 缺陷留档 / 接手入口 / 评测方案与基线
 ```
 
@@ -466,7 +466,7 @@ LLM_MODEL=your-model-name
 | `test_geometry.py` | 21 | 容错匹配、折行标签、同行校验、页码边界 |
 | `test_span.py` | 20 | span 硬校验两层关卡 |
 
-**合计 242 项，全部通过。**
+**合计 295 项（上表为代表性子集），全部通过。**
 
 > [!TIP]
 > `normalize` / `span` / `compute` / `formulas` 四个核心模块**只依赖 Python 标准库**。

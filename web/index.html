@@ -80,6 +80,29 @@ img.evidence{width:100%;border:1px solid var(--line);border-radius:8px;margin-to
 .spin{display:inline-block;width:14px;height:14px;border:2px solid #fff3;border-top-color:#fff;
   border-radius:50%;animation:r .7s linear infinite;vertical-align:-2px;margin-right:6px}
 @keyframes r{to{transform:rotate(360deg)}}
+
+/* ---- 用户视角重排：把机制藏起来，只露"问→答→证据" ---- */
+.hero{background:linear-gradient(135deg,#0f2740,#1f4e79);color:#fff;border:0;padding:30px 26px;margin-bottom:20px}
+.hero h1{margin:0 0 10px;font-size:24px;letter-spacing:.5px}
+.hero p{margin:0;max-width:760px;color:#d6e4f2;font-size:15px;line-height:1.7}
+.doc-cards{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px}
+.doc-card{border:1.5px solid var(--line);border-radius:10px;padding:14px 18px;cursor:pointer;
+  background:#fff;font-size:15px;font-weight:600;color:var(--ink);min-width:180px;transition:.15s}
+.doc-card:hover{border-color:var(--brand)}
+.doc-card.active{border-color:var(--brand);background:var(--brand-soft);box-shadow:0 0 0 2px #cfe0f2 inset}
+.answer-card{border:1px solid var(--line);border-radius:12px;padding:22px;background:#fff}
+.badge-ok{display:inline-block;background:var(--ok-bg);color:var(--ok);border:1px solid #bfe3cd;
+  border-radius:999px;padding:4px 12px;font-size:13px;font-weight:600}
+.pill-fail{display:inline-block;background:var(--fail-bg);color:var(--fail);border:1px solid #f3c7c3;
+  border-radius:999px;padding:4px 12px;font-size:13px;font-weight:600}
+.ans-label{color:var(--muted);font-size:15px;margin-top:14px}
+.ans-number{font-family:var(--mono);font-size:34px;font-weight:700;color:var(--brand);line-height:1.2;word-break:break-all}
+.ans-unit{font-size:16px;color:var(--muted);font-weight:500}
+.ans-source{color:var(--ink);font-size:14px;margin-top:8px}
+.refuse-card{border:1px solid #f3c7c3;border-radius:12px;padding:20px;background:var(--fail-bg)}
+.refuse-card p{color:var(--fail)}
+details.tech{border:1px dashed var(--line);border-radius:10px;padding:6px 18px;margin-bottom:20px;background:#fafbfc}
+details.tech>summary{cursor:pointer;font-weight:600;color:var(--muted);padding:8px 0}
 </style>
 </head>
 <body>
@@ -90,38 +113,34 @@ img.evidence{width:100%;border:1px solid var(--line);border-radius:8px;margin-to
 </header>
 
 <main>
-  <!-- ① 提问 -->
+  <!-- ① Hero -->
+  <section class="hero">
+    <h1>问财报里的任何数字，我帮你点回原文</h1>
+    <p>这是一份真实年报。用大白话问我一个数字，我会把答案，连同它在报告里的页码、那一行原文一起给你——
+      不猜、不编；没找到就直说。</p>
+  </section>
+
+  <!-- ② 选择报告 -->
   <section>
-    <h2><span class="n">01</span> 提问</h2>
-    <div class="grid">
-      <div>
-        <label for="q">输入一个关于年报的问题（确定性路径，不经 LLM）</label>
-        <textarea id="q" rows="3">2024年营业收入是多少</textarea>
-        <div style="margin-top:12px;display:flex;gap:10px">
-          <button id="askBtn" onclick="ask()">核验</button>
-          <button class="ghost" onclick="askRefuse()">试一个必拒答的问题</button>
-        </div>
-        <div class="chips" id="chips"></div>
-      </div>
-      <div>
-        <label>执行轨迹（每一步的状态都是程序判定，不是模型自述）</label>
-        <div id="trace"><p class="empty">点击「核验」后显示。</p></div>
-      </div>
+    <h2>① 选择报告</h2>
+    <p class="foot" style="margin-top:0">先用示例报告体验；后续可上传你自己的财报。</p>
+    <div id="docCards" class="doc-cards"></div>
+  </section>
+
+  <!-- ③ 提问（主体验） -->
+  <section>
+    <h2>② 提问</h2>
+    <label for="q">用大白话问，比如「去年赚了多少钱」</label>
+    <textarea id="q" rows="2">营业收入是多少</textarea>
+    <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+      <button id="askBtn" onclick="ask()">核验</button>
     </div>
+    <div class="chips" id="chips"></div>
+    <div id="verdict"><p class="empty">输入一个问题，点「核验」。</p></div>
   </section>
 
-  <!-- ② 结论 -->
-  <section>
-    <h2><span class="n">02</span> 六元组与证据</h2>
-    <div id="verdict"><p class="empty">尚无结果。</p></div>
-  </section>
-
-  <!-- ③ 召回明细 -->
-  <section>
-    <h2><span class="n">03</span> 四路召回明细（RRF 融合前）</h2>
-    <div class="kv" id="channels"></div>
-    <div id="candidates"><p class="empty">尚无候选。</p></div>
-  </section>
+  <details class="tech">
+    <summary>技术原理 · 给想深挖机制的人（普通用户可直接跳过）</summary>
 
   <!-- ④ 防幻觉 -->
   <section>
@@ -163,23 +182,104 @@ img.evidence{width:100%;border:1px solid var(--line);border-radius:8px;margin-to
     </details>
   </section>
 
+  </details>
+
+  <!-- ⑦ 真实场景问题示例 -->
+  <section>
+    <h2><span class="n">07</span> 真实场景下你会问什么（不是考题，是真实需求）</h2>
+    <p class="foot" style="margin-top:0">
+      这个系统要解决的真问题不是「考它会不会算」，而是：<b>你手里有一份年报（或一段被引用的数字），
+      想确认这个数字在原文里到底存不存在、对不对得上内部勾稽关系</b>。下面按真实人物与场景分类——
+      每一类都标注了「谁会这么问、为什么问、系统怎么答」。点开你关心的那一类即可。
+    </p>
+
+    <details open>
+      <summary style="cursor:pointer;font-weight:600">① 手里有报告，要核对一个被引用的数字（最常见）</summary>
+      <div style="margin-top:10px">
+        <p class="foot">人物：读研报 / 看新闻的个人投资者、做尽调的分析师。<br>
+          动机：研报写「茅台 2024 年营收 1709 亿」，你不想盲信，想点回原文确认。这类问题走<b>单点核验</b>，
+          系统把数字逐字定位到原文页码并做 span 硬校验。</p>
+        <ul style="font-size:14px;line-height:1.9">
+          <li>「2024 年营业收入是多少」—— 确认营收规模（利润表第一行）。</li>
+          <li>「2024 年归母净利润是多少」—— 区别于「净利润」，扣除了少数股东损益，是普通股股东真正享有的利润。</li>
+          <li>「2024 年经营活动产生的现金流量净额是多少」—— 看主业「真金白银」进账，和净利润对照能判断盈利质量。</li>
+          <li>「资产负债率」—— 负债合计 ÷ 资产总计。本系统目前只直接校验分子分母（负债合计 / 资产总计），
+            比率本身需走 Agent 计算路径或后续补 F7，单点查询会退化为取「负债合计」。</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary style="cursor:pointer;font-weight:600">② 核对内部勾稽关系（发现数据矛盾的线索）</summary>
+      <div style="margin-top:10px">
+        <p class="foot">人物：审计、财务尽调、监管核查。<br>
+          动机：报表内部的恒等式若不平，往往是录入错误或人为调节的信号。这类问题走<b>勾稽核验</b>（点击上方 05 区块按钮）。</p>
+        <ul style="font-size:14px;line-height:1.9">
+          <li>「资产是不是等于负债加所有者权益」—— 资产负债表第一恒等式（F1）。</li>
+          <li>「净利润和留存收益变动对不对得上」—— 利润表净利润应结转进权益（F2）。</li>
+          <li>「经营、投资、筹资三类现金流加起来，是不是等于现金净增加额」—— 现金流量表闭环（F3）。</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary style="cursor:pointer;font-weight:600">③ 看趋势与盈利质量（同比 / 毛利率）</summary>
+      <div style="margin-top:10px">
+        <p class="foot">人物：长期跟踪一家公司的投资者。<br>
+          动机：单看一年没意义，要跟去年比、看结构。这类问题走<b>Agent 计算路径</b>（F4 毛利率、F6 同比变动）。</p>
+        <ul style="font-size:14px;line-height:1.9">
+          <li>「今年营收比去年增长了多少」—— 同比变动（F6）。</li>
+          <li>「毛利率有没有下滑」——（营收 − 营业成本）÷ 营收（F4）；毛利率持续下滑常预示价格战或成本失控。</li>
+          <li>「经营现金流和净利润差多少」—— 利润含金量；长期「净利差很多」可能是应收账款堆出来的纸面利润。</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary style="cursor:pointer;font-weight:600">④ 故意刁难：要它拒答 / 别编（护栏边界）</summary>
+      <div style="margin-top:10px">
+        <p class="foot">人物：评测者 / 安全审计。<br>
+          动机：确认系统「不知道就说不知道」，而不是硬编一个数字。这类问题用来演示<b>拒答</b>与<b>防幻觉</b>。</p>
+        <ul style="font-size:14px;line-height:1.9">
+          <li>「火星基地折旧年限是多少」—— 报告里根本没有，四路召回全 0，必须拒答（NO_RECALL）。</li>
+          <li>「五粮液 2024 年营收多少」—— 问的是别的公司，主体约束应拦下（wrong_document）。</li>
+          <li>把真实片段里的数字改一个零再喂回去 —— 见上方 04 防幻觉台，第二例必被拦截。</li>
+        </ul>
+      </div>
+    </details>
+
+    <p class="foot" style="margin-top:12px">
+      更完整的分类与「哪类问题现在就能演示、哪类需走 Agent 计算路径」的说明，见仓库
+      <code>docs/真实财报问题示例.md</code>。
+    </p>
+  </section>
+
   <p class="foot">
-    已知限制：公司名与期间目前来自演示配置（封面结构化解析待接入）；向量通道走本地 TF-IDF（端点无 embedding 能力）；
-    坐标层依赖 PDF 内嵌文本层，扫描版 PDF 需先接 OCR。
+    已知限制：公司名 / 期间 / 披露单位均从文档自身识别（编制单位 + 表头年份 + 单位声明），
+    不再硬编码为演示配置；向量通道走本地 TF-IDF（端点无 embedding 能力）；
+    坐标层依赖 PDF 内嵌文本层，扫描版 PDF 需先接 OCR。新增演示报告：在 <code>web/server.py</code> 的
+    <code>DOC_CONFIGS</code> 登记一项，再跑 <code>scripts/build_index.py</code> 生成索引即可，无需改端点逻辑。
   </p>
 </main>
 
 <script>
+// 每个报告的示例问题都用了该报告里真实存在的数字（实跑确认可答），
+// 切换报告时示例芯片会跟着换，避免用 2024 的数字去问 2023 的报告。
+// 示例问题用大白话，且都对应报告里真实存在的科目（实跑确认可答，且不会被歧义命中到子科目行）。
+// 切换报告时这些芯片会跟着换——同一句话，2024 与 2023 返回的数字不同。
+// 注：刻意避开「经营现金流」这类口语简称——它会歧义命中「支付/收到其他与经营活动有关的现金」等子科目行，
+// 返回的不是用户想看的净额（见 docs/技术问题留档.md P-030）。
 const EXAMPLES = [
-  "2024年资产总计是多少",
-  "负债合计",
-  "2024年营业收入是多少",
-  "242,011,315,120.60",
-  "2024年营业成本",
+  "营业收入是多少",
+  "净利润是多少",
+  "资产总计是多少",
+  "负债合计是多少",
+  "货币资金是多少",
 ];
 // 这条查询四路均无命中（实跑确认：label/lexical/numeric/vector 全 0），
 // 用来演示「无证据即拒答」，而不是演示检索不准。
 const REFUSE_EXAMPLE = "火星基地折旧年限";
+let currentDoc = "MOUTAI_2024";
 
 function chips(){
   const box = document.getElementById('chips');
@@ -196,11 +296,29 @@ function chips(){
 }
 
 async function meta(){
-  const r = await fetch('/api/meta'); const m = await r.json();
-  document.getElementById('metaBox').textContent =
-    `${m.company} · ${m.period} · 披露单位 ${m.disclosure_unit} · ${m.chunk_count} chunks / ${m.table_count} 表 · 向量 ${m.embedder}`;
+  const r = await fetch('/api/meta?doc='+currentDoc); const m = await r.json();
+  document.getElementById('metaBox').textContent = `${m.company} · ${m.period}`;
   const g = document.getElementById('graphText');
   if(g) g.textContent = m.agent_graph || '';
+  // 用服务端下发的报告清单渲染卡片，避免前后端各自维护报告列表而漂移
+  const cards = document.getElementById('docCards');
+  if(cards && m.available_docs){
+    cards.innerHTML='';
+    m.available_docs.forEach(d=>{
+      const c=document.createElement('div');
+      c.className='doc-card'+(d.id===currentDoc?' active':'');
+      c.textContent=d.label;
+      c.onclick=()=>onDocPick(d.id);
+      cards.appendChild(c);
+    });
+  }
+}
+
+function onDocPick(id){
+  if(id===currentDoc) return;
+  currentDoc = id;
+  document.getElementById('verdict').innerHTML='<p class="empty">已切换报告，点「核验」重新提问。</p>';
+  meta(); chips();   // meta 重渲染卡片高亮，chips 换成该报告的真实示例
 }
 
 function stageHtml(trace){
@@ -215,34 +333,31 @@ async function ask(){
   if(!q) return;
   const btn=document.getElementById('askBtn');
   btn.disabled=true; btn.innerHTML='<span class="spin"></span>核验中';
-  document.getElementById('trace').innerHTML='<p class="empty">运行中…</p>';
+  const box=document.getElementById('verdict');
+  box.innerHTML='<div class="answer-card"><p class="empty">核验中…</p></div>';
   try{
     const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({question:q})});
+      body:JSON.stringify({question:q, doc:currentDoc})});
     const d=await r.json();
-    document.getElementById('trace').innerHTML=stageHtml(d.trace);
-    renderVerdict(d); renderChannels(d); renderCandidates(d);
+    renderVerdict(d);
   }catch(e){
-    document.getElementById('verdict').innerHTML='<p class="empty">请求失败：'+e+'</p>';
+    box.innerHTML='<p class="empty">请求失败：'+e+'</p>';
   }finally{ btn.disabled=false; btn.textContent='核验'; }
-}
-
-function askRefuse(){
-  document.getElementById('q').value=REFUSE_EXAMPLE; ask();
 }
 
 function renderChannels(d){
   const pc=d.per_channel||{};
-  document.getElementById('channels').innerHTML =
+  const el=document.getElementById('channelsInline'); if(!el) return;
+  el.innerHTML =
     Object.entries(pc).map(([k,v])=>`<span><b>${k}</b> ${v} 条</span>`).join('') ||
     '<span class="empty">无</span>';
 }
 
 function renderCandidates(d){
-  const box=document.getElementById('candidates');
+  const el=document.getElementById('candidatesInline'); if(!el) return;
   const cs=d.candidates||[];
-  if(!cs.length){box.innerHTML='<p class="empty">无候选（四路均未命中）。</p>';return;}
-  box.innerHTML=cs.map((c,i)=>`<div class="cand">
+  if(!cs.length){el.innerHTML='<p class="empty">无候选（四路均未命中）。</p>';return;}
+  el.innerHTML=cs.map((c,i)=>`<div class="cand">
     <span class="rank">#${i+1}</span>
     <span class="lb">${esc(c.label)}
       <div>${(c.via||[]).map(v=>`<span class="badge ${v}">${v}</span>`).join('')||'<span class="empty">无通道</span>'}</div></span>
@@ -253,35 +368,40 @@ function renderCandidates(d){
 function renderVerdict(d){
   const box=document.getElementById('verdict');
   if(d.decision==='refuse'){
-    box.innerHTML=`<div class="banner refuse">拒答 · ${esc(d.refuse_reason)}</div>
-      <p style="margin:0">${esc(d.refuse_detail)}</p>
-      <p class="foot" style="margin-top:10px">拒答是程序级判定：模型没有否决权。</p>`;
+    box.innerHTML=`<div class="refuse-card">
+      <div class="pill-fail">没找到</div>
+      <p style="margin:8px 0 0">我在报告里没有找到与「${esc(d.question)}」对应的数字。</p>
+      <p class="foot">可能是报告里没有这项，或你问的是另一家公司 / 另一个年份。系统不猜测、不补全，宁可直说。</p>
+    </div>`;
     return;
   }
   const s=d.six_tuple||{}; const g=d.geometry||{};
-  box.innerHTML=`<div class="banner answer">通过校验 · 已给出带溯源的数字</div>
-    <div class="grid">
-      <div>
-        <table>${Object.entries(s).map(([k,v])=>
-          `<tr><th>${k}</th><td class="v">${esc(v)}</td></tr>`).join('')}</table>
-        <p class="foot">公司 / 期间 来源：${esc(d.metadata_source||'—')} · span 命中方式：${esc(d.span_mode||'—')}</p>
-      </div>
-      <div>
-        <label>原文片段（span 硬校验逐字比对的对象）</label>
-        <blockquote>${esc(d.fragment)}</blockquote>
-        <label style="margin-top:12px">PDF 证据特写${g.verified?' · 同行校验通过':' · 未通过同行校验'}</label>
-        ${g.image?`<img class="evidence" src="${g.image}" alt="证据高亮">`
-                 :'<p class="empty">未定位到坐标，不展示高亮图。</p>'}
-        ${g.bbox?`<p class="foot">第 ${g.page} 页 · PDF point ${esc(JSON.stringify(g.bbox))}</p>`:''}
-      </div>
-    </div>`;
+  box.innerHTML=`<div class="answer-card">
+    <div class="badge-ok">✓ 已逐字核对原文</div>
+    <div class="ans-label">${esc(s['指标']||'')}</div>
+    <div class="ans-number">${esc(s['数值']||'')}<span class="ans-unit"> ${esc(s['单位']||'')}</span></div>
+    <div class="ans-source">${esc(s['公司']||'')} · ${esc(s['期间']||'')} · ${esc(s['来源']||'')}</div>
+    ${g.image?`<img class="evidence" src="${g.image}" alt="原文证据高亮">`:''}
+    <details style="margin-top:12px">
+      <summary class="foot" style="cursor:pointer">查看原文片段（逐字比对的对象）</summary>
+      <blockquote>${esc(d.fragment)}</blockquote>
+    </details>
+    <details style="margin-top:6px">
+      <summary class="foot" style="cursor:pointer">核验细节（技术）</summary>
+      <div id="traceInline"></div>
+      <div class="kv" id="channelsInline" style="margin-top:8px"></div>
+      <div id="candidatesInline"></div>
+    </details>
+  </div>`;
+  const ti=document.getElementById('traceInline'); if(ti) ti.innerHTML=stageHtml(d.trace||[]);
+  renderChannels(d); renderCandidates(d);
 }
 
 async function guard(){
-  const q=document.getElementById('q').value.trim()||EXAMPLES[2];
+  const q=document.getElementById('q').value.trim()||EXAMPLES[0]||'营业收入是多少';
   document.getElementById('guardBox').innerHTML='<p class="empty">运行中…</p>';
   const r=await fetch('/api/guard',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({question:q,perturbation:'10000000'})});
+    body:JSON.stringify({question:q,perturbation:'10000000',doc:currentDoc})});
   const d=await r.json();
   if(!d.cases||!d.cases.length){
     document.getElementById('guardBox').innerHTML='<p class="empty">'+esc(d.note||'无结果')+'</p>';return;
@@ -302,7 +422,7 @@ async function guard(){
 
 async function identity(period){
   document.getElementById('identityBox').innerHTML='<p class="empty">运行中…</p>';
-  const r=await fetch('/api/identity?period='+period,{method:'POST'});
+  const r=await fetch('/api/identity?period='+period+'&doc='+currentDoc,{method:'POST'});
   const d=await r.json();
   const box=document.getElementById('identityBox');
   if(!d.available){box.innerHTML='<p class="empty">'+esc(d.detail)+'</p>';return;}
@@ -322,12 +442,12 @@ async function identity(period){
 }
 
 async function agentRun(planner){
-  const q=document.getElementById('q').value.trim()||'2024年营业收入是多少';
+  const q=document.getElementById('q').value.trim()||'营业收入是多少';
   const box=document.getElementById('agentBox');
   box.innerHTML='<p class="empty">运行中…（LLM 调度会慢一些）</p>';
   try{
     const r=await fetch('/api/agent?planner='+planner,{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q})});
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q, doc:currentDoc})});
     const d=await r.json();
     const pill = d.decision==='ANSWER'?'ok':'fail';
     const srcBadge = s => `<span class="badge ${s==='llm'?'vector':(s==='tool'?'lexical':'label')}">${s}</span>`;

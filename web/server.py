@@ -42,48 +42,76 @@ from verifin.span import verify_evidence  # noqa: E402
 from verifin.runtime import build_document_runtime  # noqa: E402
 
 # --------------------------------------------------------------------------
-# 演示所用的一份真实年报
+# 多报告注册表
 # --------------------------------------------------------------------------
-
-PDF = ROOT / "data/pdfs/MOUTAI_2024_ANNUAL.pdf"
-PRODUCT = ROOT / "data/parsed/moutai2024_fs"
-INDEX_DB = ROOT / "data/index/moutai2024.db"
-ASSET_DIR = ROOT / "web/assets"
-PAGE_FILE = ROOT / "web/index.html"
-
-DOC_ID = "MOUTAI_2024"
-COMPANY = "贵州茅台酒股份有限公司（600519）"
-PERIOD = "2024 年度（2024-01-01 ~ 2024-12-31）"
-
-#: 公司名与期间目前由演示配置给出，尚未接入封面结构化解析。
-#: 这一条在页面上如实标注，不伪装成"已经解析出来了"。
-METADATA_SOURCE = "演示配置（封面结构化解析待接入）"
-
-
-# --------------------------------------------------------------------------
-# 启动期一次性装载
-# --------------------------------------------------------------------------
+# 每份演示报告 = 一份已解析的年报 + 它的检索索引库。新增报告只需在此登记一项，
+# 再跑 `scripts/build_index.py` 生成对应的 <doc>.db，无需改任何端点逻辑。
 #
+# 公司名 / 期间 / 披露单位全部从文档自身读出（编制单位 + 表头年份 + 单位: 声明），
+# 不再硬编码 —— 这把"封面结构化解析"缺口里的 company / period 部分补上了，
+# 页面上的 metadata_source 也如实改为"文档自动识别"。
+
+PDF_DIR = ROOT / "data/pdfs"
+PARSED_DIR = ROOT / "data/parsed"
+INDEX_DIR = ROOT / "data/index"
+
+DOC_CONFIGS: dict[str, dict] = {
+    "MOUTAI_2024": {
+        "label": "贵州茅台 2024 年报",
+        "pdf": PDF_DIR / "MOUTAI_2024_ANNUAL.pdf",
+        "product": PARSED_DIR / "moutai2024_fs",
+        "index_db": INDEX_DIR / "moutai2024.db",
+        "stitched": PARSED_DIR / "moutai2024_fs_stitched.md",
+    },
+    "MOUTAI_2023": {
+        "label": "贵州茅台 2023 年报",
+        "pdf": PDF_DIR / "MOUTAI_2023_ANNUAL.pdf",
+        "product": PARSED_DIR / "moutai2023_fs",
+        "index_db": INDEX_DIR / "moutai2023.db",
+        "stitched": PARSED_DIR / "moutai2023_fs_stitched.md",
+    },
+}
+
+DEFAULT_DOC = "MOUTAI_2024"
+
+#: 公司名与期间由文档自动识别（编制单位 + 表头年份），不再写死成演示配置。
+METADATA_SOURCE = "文档自动识别（编制单位 + 表头年份 + 单位声明）"
+
+
+def _period_str(rt) -> str:
+    """由报表表头的年份推导期间展示串（期间不再硬编码）。"""
+    years = rt.constraints.report_years
+    if not years:
+        return "（期间未识别）"
+    cur = max(years)
+    return f"{cur} 年度（{cur}-01-01 ~ {cur}-12-31）"
+
+
+# --------------------------------------------------------------------------
+# 启动期一次性装载所有报告
+# --------------------------------------------------------------------------
 # 装配集中在 `verifin.runtime`，与命令行演示、评测执行器共用同一份 ——
 # 否则三处各写一遍，迟早各自漂移，评测量到的就不是网页上跑的那个系统。
 
-DOC = build_document_runtime(
-    doc_id=DOC_ID,
-    product=PRODUCT,
-    index_db=INDEX_DB,
-    pdf=PDF,
-    stitched=ROOT / "data/parsed/moutai2024_fs_stitched.md",
-)
-REPORT = DOC.report
-CHUNKS = DOC.chunks
-BY_LABEL = DOC.by_label
-INDEX = DOC.index
-DISCLOSURE_UNIT = DOC.unit
-UNIT_SOURCE = DOC.unit_source
-#: 检索索引是共享可变资源，读也要串行化。
-#: `check_same_thread=False` 只是**允许**跨线程访问，不等于跨线程安全 ——
-#: 并发的 `execute` + `commit` 会事务交错。锁由 runtime 统一提供。
-INDEX_LOCK = DOC.index_lock
+BUNDLES: dict[str, "DocumentRuntime"] = {}
+for _doc_id, _cfg in DOC_CONFIGS.items():
+    _rt = build_document_runtime(
+        doc_id=_doc_id,
+        product=_cfg["product"],
+        index_db=_cfg["index_db"],
+        pdf=_cfg["pdf"],
+        stitched=_cfg.get("stitched"),
+    )
+    BUNDLES[_doc_id] = _rt
+
+
+def get_bundle(doc_id: str | None = None):
+    """按 doc_id 取运行时；非法 / 缺省回落到默认报告。"""
+    return BUNDLES.get(doc_id or DEFAULT_DOC) or BUNDLES[DEFAULT_DOC]
+
+
+ASSET_DIR = ROOT / "web/assets"
+PAGE_FILE = ROOT / "web/index.html"
 ASSET_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="VeriFin Demo", version="0.1.0")
@@ -105,7 +133,7 @@ def _to_decimal(raw: str) -> Decimal | None:
         return None
 
 
-def _render_evidence(page: int, box, out_path: Path, *, zoom: float = 3.0,
+def _render_evidence(pdf: Path, page: int, box, out_path: Path, *, zoom: float = 3.0,
                      pad: float = 22.0) -> Path:
     """把某一行高亮后**裁剪**成证据特写图。
 
@@ -113,7 +141,7 @@ def _render_evidence(page: int, box, out_path: Path, *, zoom: float = 3.0,
     所以对证据行做放大裁剪 —— 这张图是给人工复核用的，不是装饰。
     渲染完立刻删掉批注，避免重复查询时高亮累积。
     """
-    doc = pymupdf.open(PDF)
+    doc = pymupdf.open(pdf)
     try:
         pypage = doc[page - 1]
         annot = pypage.add_highlight_annot(pymupdf.Rect(*box.astuple()))
@@ -165,11 +193,13 @@ class AskRequest(BaseModel):
     # 上限复用 Agent 层的常量，不在这里另写一个数 —— 两处各写一份迟早漂移，
     # 漂移的后果是「web 放行的问句在 Agent 层被拒」这种难查的不一致。
     question: str = Field(..., min_length=1, max_length=MAX_QUESTION_CHARS)
+    doc: str = DEFAULT_DOC
 
 
 class GuardRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=MAX_QUESTION_CHARS)
     perturbation: str = Field("10000000")
+    doc: str = DEFAULT_DOC
 
 
 # --------------------------------------------------------------------------
@@ -199,11 +229,12 @@ def asset(name: str) -> FileResponse:
 def ask(req: AskRequest) -> dict:
     """跑一次完整的确定性核验链路。"""
     question = req.question.strip()
+    b = get_bundle(req.doc)
     trace: list[dict] = []
 
     # ---- 1. 四路召回 ----
-    with INDEX_LOCK:
-        result = INDEX.retrieve(question, top_k=5)
+    with b.index_lock:
+        result = b.index.retrieve(question, top_k=5)
     per_channel = dict(result.per_channel)
     trace.append(_stage(
         "四路召回",
@@ -288,7 +319,7 @@ def ask(req: AskRequest) -> dict:
         ))
     else:
         trace.append(_stage("证据选取", "ok", f"取 RRF top-1「{chunk.label}」"))
-    trace.append(_stage("数值归一化", "ok", f"{raw_value} → Decimal（单位：{DISCLOSURE_UNIT}）"))
+    trace.append(_stage("数值归一化", "ok", f"{raw_value} → Decimal（单位：{b.unit}）"))
 
     # ---- 3. span 硬校验（两层关卡）----
     claimed_span = _claimed_fragment(chunk.text, raw_value or "")
@@ -296,7 +327,7 @@ def ask(req: AskRequest) -> dict:
         claimed_span=claimed_span,
         chunk_text=chunk.text,
         claimed_value=value,
-        claimed_unit=DISCLOSURE_UNIT,
+        claimed_unit=b.unit,
     )
     trace.append(_stage(
         "span 硬校验",
@@ -317,11 +348,11 @@ def ask(req: AskRequest) -> dict:
 
     # ---- 4. 坐标定位（含同行校验）----
     geometry: dict | None = None
-    with open_pdf(PDF) as geo:
+    with open_pdf(b.pdf) as geo:
         loc = geo.locate_row(chunk.page, chunk.label, raw_value or "")
         if loc.same_row_verified and loc.row_box is not None:
             name = f"ev_{uuid.uuid4().hex[:10]}.png"
-            _render_evidence(chunk.page, loc.row_box, ASSET_DIR / name)
+            _render_evidence(b.pdf, chunk.page, loc.row_box, ASSET_DIR / name)
             box = loc.row_box
             geometry = {
                 "verified": True,
@@ -347,11 +378,11 @@ def ask(req: AskRequest) -> dict:
 
     # ---- 5. 六元组完整性 ----
     six = {
-        "公司": COMPANY,
-        "期间": PERIOD,
+        "公司": b.constraints.company or "（发行人未识别）",
+        "期间": _period_str(b),
         "指标": chunk.label,
         "数值": raw_value,
-        "单位": DISCLOSURE_UNIT,
+        "单位": b.unit,
         "来源": f"第 {chunk.page} 页" + (f" · 坐标 {tuple(geometry['bbox'])}" if geometry and geometry["bbox"] else ""),
     }
     missing = [k for k, v in six.items() if not v]
@@ -395,8 +426,9 @@ def guard(req: GuardRequest) -> dict:
     三例分别是：真实值 / 篡改值 / 伪造片段。
     第二例最危险 —— 片段是真的，数字是假的，只读片段那一层会放行。
     """
-    with INDEX_LOCK:
-        result = INDEX.retrieve(req.question, top_k=1)
+    b = get_bundle(req.doc)
+    with b.index_lock:
+        result = b.index.retrieve(req.question, top_k=1)
     if result.is_empty:
         return {"question": req.question, "cases": [], "note": "无命中，无法演示"}
 
@@ -413,7 +445,7 @@ def guard(req: GuardRequest) -> dict:
             claimed_span=span,
             chunk_text=chunk.text,
             claimed_value=val,
-            claimed_unit=DISCLOSURE_UNIT,
+            claimed_unit=b.unit,
         )
         return {
             "title": title,
@@ -486,24 +518,25 @@ LABEL_ALIAS: dict[str, str] = {
 }
 
 
-def _resolve_label(name: str) -> str | None:
+def _resolve_label(name: str, by_label: dict) -> str | None:
     """把公式里的规范科目名对齐到报表实际行名。
 
     只做**精确匹配 + 显式别名**，不做模糊包含 ——
     模糊匹配会让「负债合计」落到「非流动负债合计」上，
     那正是本项目要防的张冠李戴。
     """
-    if name in BY_LABEL:
+    if name in by_label:
         return name
     alias = LABEL_ALIAS.get(name)
-    if alias and alias in BY_LABEL:
+    if alias and alias in by_label:
         return alias
     return None
 
 
 @app.post("/api/identity")
-def identity(period: str = "current") -> dict:
+def identity(period: str = "current", doc: str = DEFAULT_DOC) -> dict:
     """核验 资产 = 负债 + 所有者权益（本期 / 上期双列）。"""
+    b = get_bundle(doc)
     column = 0 if period == "current" else 1
     operands: dict[str, Decimal] = {}
     missing: list[str] = []
@@ -511,8 +544,8 @@ def identity(period: str = "current") -> dict:
 
     formula = FORMULA_REGISTRY["F1"]
     for name in formula.operand_names:
-        label = _resolve_label(name)
-        chunk = BY_LABEL.get(label) if label else None
+        label = _resolve_label(name, b.by_label)
+        chunk = b.by_label.get(label) if label else None
         if chunk is None or len(chunk.values) <= column:
             missing.append(name)
             continue
@@ -538,7 +571,7 @@ def identity(period: str = "current") -> dict:
             "sources": sources,
         }
 
-    outcome = evaluate_formula("F1", operands, disclosure_unit=DISCLOSURE_UNIT)
+    outcome = evaluate_formula("F1", operands, disclosure_unit=b.unit)
     return {
         "period": period,
         "available": True,
@@ -551,26 +584,32 @@ def identity(period: str = "current") -> dict:
         "tolerance": str(outcome.tolerance),
         "detail": outcome.detail,
         "sources": sources,
-        "disclosure_unit": DISCLOSURE_UNIT,
+        "disclosure_unit": b.unit,
     }
 
 
 @app.get("/api/meta")
-def meta() -> dict:
-    with INDEX_LOCK:
-        embedder = INDEX.embedder_name
+def meta(doc: str = DEFAULT_DOC) -> dict:
+    b = get_bundle(doc)
+    with b.index_lock:
+        embedder = b.index.embedder_name
     return {
-        "company": COMPANY,
-        "period": PERIOD,
+        "company": b.constraints.company or "（发行人未识别）",
+        "period": _period_str(b),
         "metadata_source": METADATA_SOURCE,
-        "disclosure_unit": DISCLOSURE_UNIT,
-        "disclosure_unit_source": UNIT_SOURCE,
-        "doc_id": DOC_ID,
-        "chunk_count": len(CHUNKS),
-        "table_count": REPORT.table_count,
+        "disclosure_unit": b.unit,
+        "disclosure_unit_source": b.unit_source,
+        "doc_id": b.doc_id,
+        "chunk_count": len(b.chunks),
+        "table_count": b.report.table_count,
         "embedder": embedder,
-        "pdf": PDF.name,
+        "pdf": b.pdf.name if b.pdf else None,
         "agent_graph": render_graph_text(),
+        "available_docs": [
+            {"id": _id, "label": _cfg["label"]}
+            for _id, _cfg in DOC_CONFIGS.items()
+        ],
+        "default_doc": DEFAULT_DOC,
     }
 
 
@@ -580,11 +619,7 @@ def meta() -> dict:
 
 AGENT_TRACE = TraceStore(ROOT / "data/index/agent_trace_web.db")
 
-AGENT_RUNTIME = DOC.tool_runtime(
-    company=COMPANY,
-    period=PERIOD,
-    pdf_open=lambda: open_pdf(PDF),
-)
+AGENT_RUNTIME = None  # 不再持有全局运行时；每次请求按 doc 重新装配（见 agent_run）
 
 # LLM 客户端可以共享（无状态、贵在建连），但**调度器必须每次请求新建**：
 # LLMPlanner 自己持有 LLM 调用计数器，共享它的话并发请求会互相偷预算，
@@ -616,6 +651,7 @@ def _fresh_planner(max_calls: int):
 @app.post("/api/agent")
 def agent_run(req: AskRequest, planner: str = "policy") -> dict:
     """跑一次完整编排：调度器在图里选节点，每一步工具调用都入轨迹库。"""
+    b = get_bundle(req.doc)
     use_llm = planner == "llm"
     impl = None
     note = None
@@ -625,8 +661,13 @@ def agent_run(req: AskRequest, planner: str = "policy") -> dict:
         if impl is None:
             note = f"LLM 调度不可用（{err}），本次改用确定性策略"
 
+    agent_rt = b.tool_runtime(
+        company=b.constraints.company,
+        period=_period_str(b),
+        pdf_open=lambda: open_pdf(b.pdf),
+    )
     agent = VeriFinAgent(
-        AGENT_RUNTIME,
+        agent_rt,
         budget=budget,
         planner=impl,
         trace=AGENT_TRACE,
