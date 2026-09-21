@@ -106,7 +106,26 @@ class EvalItem:
     formula: str | None = None
     """L2 题必填：走哪个公式（必须是 `FORMULA_REGISTRY` 的 id）。"""
     refusal_reason: str | None = None
-    """R 题必填：为什么它不可答（否则无法区分「正确拒答」与「恰好在题里没找到」）。"""
+    """R 题必填：为什么它不可答（否则无法区分「正确拒答」与「恰好在题里没找到」）。
+
+    注意这是**人的分类**（"这题为什么问不出来"），与系统的机器原因
+    （`NO_RECALL` / `AMBIGUOUS_ABBREVIATION` / …）是两套词汇，多数情况下对得上，
+    但对不上也正常：一条题可以因为"信息不在解析窗口内"（人的分类
+    `out_of_parse_window`）而被系统以 `NO_RECALL` 或 `LABEL_MISMATCH` 拒掉 ——
+    两者都对，只是看问题的角度不同。
+    """
+    expected_refusal_code: str | None = None
+    """可选：**系统侧**的机器拒答原因，填了就参与判分。
+
+    为什么需要它：R 题的判分原先只比"有没有拒答"，不比"为什么拒答"。
+    而有些缺陷的表现恰恰是**该拒的拒了、真的该答的也拒了，原因却不是标注的那一个**——
+    例如口语简称「现金流」在修 P-030 之前会以笼统的 `LABEL_MISMATCH` 拒答，
+    修好之后才是明确的 `AMBIGUOUS_ABBREVIATION`。两者都"拒答了"，
+    只看是否拒答的话，这条题对本缺陷**零约束力**（一个把所有问句都拒答的废系统
+    也能过）。填上这个字段，评测才真正守住"拒得明白"而不仅是"拒了"。
+
+    只在该原因本身是被测的修复点时填；不填则退回"只比是否拒答"。
+    """
 
     # --- 元信息 -------------------------------------------------------
     difficulty: str = "medium"
@@ -133,6 +152,7 @@ class EvalItem:
             "gold_operands": dict(self.gold_operands),
             "formula": self.formula,
             "refusal_reason": self.refusal_reason,
+            "expected_refusal_code": self.expected_refusal_code,
             "difficulty": self.difficulty,
             "notes": self.notes,
             "source": self.source,
@@ -158,6 +178,7 @@ class EvalItem:
             gold_operands=_str_map(raw.get("gold_operands")),
             formula=_opt_str(raw.get("formula")),
             refusal_reason=_opt_str(raw.get("refusal_reason")),
+            expected_refusal_code=_opt_str(raw.get("expected_refusal_code")),
             difficulty=str(raw.get("difficulty", "medium")),
             notes=str(raw.get("notes", "")),
             source=str(raw.get("source", "")),
@@ -329,6 +350,10 @@ def validate_item(item: EvalItem) -> list[str]:
             )
         if item.refusal_reason:
             problems.append("可答题不应带 refusal_reason")
+        if item.expected_refusal_code:
+            problems.append(
+                "可答题不应带 expected_refusal_code（那是给应拒答题校验「拒得对不对」用的）"
+            )
         for page in item.gold_pages:
             if page < 1:
                 problems.append(f"gold_pages 含非法页码 {page}（页码一律 1-based）")

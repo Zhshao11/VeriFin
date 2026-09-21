@@ -36,7 +36,11 @@ if str(ROOT) not in sys.path:
 from verifin.agent.planner import Decision, LLMPlanner, policy_decide  # noqa: E402
 from verifin.agent.tools import TOOL_IMPLS, ToolRuntime  # noqa: E402
 from verifin.agent.trace import TraceStore, new_run_id  # noqa: E402
-from verifin.guards import best_label_match, label_consistency  # noqa: E402
+from verifin.guards import (  # noqa: E402
+    best_label_match,
+    detect_ambiguous_abbreviation,
+    label_consistency,
+)
 from verifin.scope import both_scopes_named, detect_scope_in_question  # noqa: E402
 
 TERMINALS = ("ANSWER", "REFUSE", "ABORT")
@@ -145,7 +149,11 @@ class RunResult:
     decision: str
     """ANSWER / REFUSE / ABORT"""
     answer: dict[str, Any] | None = None
-    refusal: dict[str, str] | None = None
+    refusal: dict[str, Any] | None = None
+    """拒答依据。`reason` 是机器可读的分类；`detail` 给人看。
+    个别原因会附**结构化的补充字段**（如歧义简称的 `ambiguous_options`），
+    故值的类型不限定为 str —— 上层要能拿到"可选的候选"去引导用户澄清，
+    而不是只收到一句文本再自己重新解析。"""
     route: str = "LOOKUP"
     steps: list[Step] = field(default_factory=list)
     budget_exceeded: bool = False
@@ -341,6 +349,35 @@ class VeriFinAgent:
     def run(self, question: str) -> RunResult:
         question = validate_question(question)
         run_id = new_run_id()
+
+        # 有歧义的口语简称在**任何工具被调用之前**就判掉（P-030 第二层）。
+        #
+        # 为什么必须前置、而不能只放在 ANSWER 的问答一致性检查里：
+        # 「2024年现金流是多少」里的「现金流」对应三张活动表的净额行，
+        # 数值各不相同。检索层并不"没有召回"，它会返回一批候选，
+        # 走到 ANSWER 时 `label_consistency` 只会给一个笼统的 `LABEL_MISMATCH`
+        # —— 用户看到的是"答非所问"，而真实原因是"你用的词对应多行，请指明哪一行"。
+        # **报错指错方向**和拒答本身一样糟：用户无从知道该怎么改。
+        # 前置判掉还顺带省掉一次注定无用的检索与若干次工具调用（真实性：不空转）。
+        ambiguous = detect_ambiguous_abbreviation(question)
+        if ambiguous is not None:
+            key = ambiguous["key"]
+            options = ambiguous["options"]
+            return RunResult(
+                run_id, question, "REFUSE",
+                refusal={
+                    "reason": "AMBIGUOUS_ABBREVIATION",
+                    "detail": (
+                        f"「{key}」在本报告里对应多个科目，数值各不相同："
+                        f"{'、'.join(options)}。"
+                        "系统不替你猜是哪一行 —— 请指明具体科目名。"
+                    ),
+                    "ambiguous_key": key,
+                    "ambiguous_options": list(options),
+                },
+                route="LOOKUP",
+            )
+
         route, formula_id = classify_intent(question, self.runtime.known_labels)
         operands = (
             parse_diff_operands(question, self.runtime.known_labels)

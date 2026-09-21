@@ -189,8 +189,23 @@ def compare(item: EvalItem, result: RunResult) -> ItemResult:
     # --------------------------------------------------- 应拒答题
     if item.expected_outcome == "REFUSE":
         if result.decision == "REFUSE":
+            # 标注了机器原因时，**必须比原因**（见 EvalItem.expected_refusal_code）。
+            #
+            # 为什么这是必要的而不是苛刻：P-030 修复前后系统**都会拒答**
+            # （修前 `LABEL_MISMATCH`、修后 `AMBIGUOUS_ABBREVIATION`）。
+            # 只比"有没有拒答"的话，这条题对那个缺陷零约束力 ——
+            # 一个把所有问句都拒答的废系统也能拿满分。判据必须能分辨
+            # "拒得明白" 与 "恰好也没找到"。
+            code = (result.refusal or {}).get("reason", "")
+            if item.expected_refusal_code and code != item.expected_refusal_code:
+                res.failure = "拒答原因不符"
+                res.detail = (
+                    f"期望拒答原因 {item.expected_refusal_code}，实得 {code or '（无）'}"
+                    " —— 拒了，但不是因为这个理由"
+                )
+                return res
             res.passed = True
-            res.detail = (result.refusal or {}).get("reason", "")
+            res.detail = code
         elif result.decision == "ABORT":
             # 「没算完」不等于「证据不足」，单独记，不算拒答成功。
             res.failure = "ABORT"

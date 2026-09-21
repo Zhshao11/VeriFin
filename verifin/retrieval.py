@@ -53,6 +53,7 @@ from typing import Iterable, Protocol, Sequence
 
 import numpy as np
 
+from .aliases import normalize_question
 from .lexicon import apply_lexicon, clean_label
 from .normalize import normalize_text, parse_amounts
 
@@ -706,7 +707,17 @@ class RetrievalIndex:
         channels: tuple[str, ...] = ("label", "lexical", "numeric", "vector"),
         rrf_k: int = DEFAULT_RRF_K,
     ) -> RetrievalResult:
-        """四路召回 → RRF 融合 → Top-K。"""
+        """四路召回 → RRF 融合 → Top-K。
+
+        入口先做一次**口语简称归一**（P-030）：把「经营现金流」这类简称展开成
+        规范科目名，再交给四路召回。放在这里而不是调用方，是为了让
+        web / CLI / 评测 / Agent 四条入口共用同一条归一规则 ——
+        归一写在某个入口上，换个入口就绕过去了，那正是 P-030 第二层的成因。
+
+        歧义简称（「营收」「净资产」）**不在此处拒答**：检索层的职责是召回，
+        判拒答属图编排层的 `GUARD`。此处只保证展开与候选返回正确。
+        """
+        query = normalize_question(query).expanded
         warnings: list[str] = []
         ranked: dict[str, list[str]] = {}
         searchers = {

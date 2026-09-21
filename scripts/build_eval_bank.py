@@ -99,6 +99,9 @@ class Refusal:
 
     `reason` 的前缀是机器可读的分类，报告里按它分组统计 ——
     「问题本身不可答」与「本系统证据不足」混在一张表里，拒答率就没法解释。
+
+    `expected_code` 是可选的**系统侧机器原因**：填了就要求系统以这个原因拒答。
+    见 `EvalItem.expected_refusal_code` —— 只在"该拒的原因"本身是被测修复点时才填。
     """
 
     seq: int
@@ -107,9 +110,10 @@ class Refusal:
     detail: str
     difficulty: str
     notes: str = ""
+    expected_code: str | None = None
 
 
-# --- L1：单值抽取（合并口径 14 题 + 母公司口径 1 题）-------------------------
+# --- L1：单值抽取（合并口径 14 题 + 母公司口径 1 题 + 口语简称 3 题）---------
 
 L1_ROWS: tuple[Row, ...] = (
     Row(1, 58, "货币资金", "59,295,822,956.89",
@@ -154,8 +158,10 @@ L1_ROWS: tuple[Row, ...] = (
     Row(15, 62, "资产总计", "180,236,524,477.01",
         "2024年母公司资产负债表的资产总计是多少？", "hard",
         scope="母公司",
-        notes="口径消歧探针。当前解析产物未给块打报表口径标签，"
-              "取数按「首次出现」落到合并口径，故此题预期失分 —— 这正是要测出来的东西"),
+        notes="口径消歧探针：同一科目名在合并（298.9B）与母公司（180.2B）两套报表下数值不同，"
+              "问句点名母公司就必须取母公司那一行。"
+              "（P-023 修复前此题失分，注释曾写「预期失分」；现已通过，注释同步更正 —— "
+              "过时的注释比没有注释更糟，它会让人以为已知问题未修）"),
 )
 
 
@@ -256,8 +262,46 @@ R_ROWS: tuple[Refusal, ...] = (
             "ambiguous_scope", "该科目在合并（298,944,579,918.70）与母公司"
                                "（180,236,524,477.01）两套报表下数值不同，问句未限定口径",
             "hard",
-            "口径不明。正确行为是先澄清或说明所用口径，"
-            "而不是静默给一个数；当前系统会静默取合并口径 → 预期失分"),
+            "口径不明。正确行为是说明所用口径或澄清，而不是静默给一个数。"
+            "（D5 修复前此题会静默取合并口径而失分；现以 AMBIGUOUS_SCOPE 拒答，已通过）"),
+    Refusal(8, "2024年现金流是多少？",
+            "ambiguous_abbreviation", "口语简称「现金流」在现金流量表里对应三张活动表的净额行，"
+                                      "数值各不相同（经营 92.5B / 投资 -1.8B / 筹资 -71.1B）",
+            "hard",
+            "口语简称歧义（P-030）。注意它**必须**以 `AMBIGUOUS_ABBREVIATION` 拒答，"
+            "而不是笼统的 `LABEL_MISMATCH` 或「没召回」——"
+            "前者告诉用户\"该指明哪一行\"，后者只让人以为\"报告里没有\"。"
+            "报错指错方向与拒答本身一样糟。故此题填了 expected_refusal_code",
+            expected_code="AMBIGUOUS_ABBREVIATION"),
+)
+
+
+# --- 口语简称探针（P-030）：追加在题库末尾，不改既有题号----------------------
+#
+# 现金流量表里 9 行都含「现金流」，口语简称在词法上同时沾到多行。修复前
+# RRF 取 top-1 会落到「支付其他与经营活动有关的现金」（9.0B）——
+# 数值真、页码真、span 通过，**全部护栏放行**，是典型的静默错误（比拒答更危险，
+# 因为用户无从分辨）。这三条把"简称必须归一到唯一规范行"钉死。
+#
+# gold 取自索引里那一行原文（与其它 L1 题同一纪律），不迁就系统输出。
+
+P030_ROWS: tuple[Row, ...] = (
+    Row(1, 67, "经营活动产生的现金流量净额", "92,463,692,168.43",
+        "2024年合并现金流量表的经营现金流是多少？", "hard",
+        notes="P-030 探针。简称「经营现金流」必须归一到「经营活动产生的现金流量净额」，"
+              "而不是被词法检索带到同族的「支付其他与经营活动有关的现金」（9.0B）。"
+              "修复前此题会「答错但看起来对」，所以只能靠评测把正确值钉死"),
+    Row(2, 67, "投资活动产生的现金流量净额", "-1,785,202,630.71",
+        "2024年合并现金流量表的投资现金流净额是多少？", "hard",
+        notes="P-030 探针（含「净额」二字的变体，且答案为负）。"
+              "负值同时守住「口径为负时不得取绝对值」——同类问题记过一次（P-016）。"
+              "另一层：别名「投资活动现金流」恰好是「投资活动现金流入小计」的前缀，"
+              "不做词尾保护会拼出不存在的科目名，这条同时守住那个回归"),
+    Row(3, 64, "归属于母公司股东的净利润", "86,228,146,421.62",
+        "2024年归母净利润是多少？", "medium",
+        notes="P-030 探针。「归母」是行业通用缩写，语义唯一。"
+              "「归母净利润」与「净利润」（89.3B）数值不同，"
+              "缩写展开必须精确落到归母那一行，而不是退化成「净利润」"),
 )
 
 
@@ -339,6 +383,27 @@ def build(con: sqlite3.Connection) -> list[EvalItem]:
                 question=r.question, question_type="R",
                 expected_outcome="REFUSE", scope="不适用",
                 refusal_reason=f"{r.reason}：{r.detail}",
+                expected_refusal_code=r.expected_code,
+                difficulty=r.difficulty, notes=r.notes, source=SOURCE,
+            )
+        )
+
+    # --- 末尾追加：口语简称探针（P-030）---
+    #
+    # 为什么**追加在末尾**而不是插进 L1_ROWS：题号是外部文档的引用锚点
+    # （`docs/技术问题留档.md` 里写了 B-MOUTAI_2024-016/017/028），
+    # 往中间插一条会让后面所有题号顺移，那些引用就全部指向错误的题目 ——
+    # 而且**不会报错**，只是安静地指错。追加不改任何既有题号。
+    tail = base + len(R_ROWS)
+    for r in P030_ROWS:
+        items.append(
+            EvalItem(
+                item_id=f"{TRACK}-{DOC}-{tail + r.seq:03d}",
+                track=TRACK, doc=DOC, company=COMPANY, period=PERIOD,
+                question=r.question, question_type="L1",
+                expected_outcome="ANSWER", scope=r.scope,
+                gold_value=r.value, gold_unit=r.unit, gold_pages=(r.page,),
+                gold_evidence=(_row_fragment(con, r.page, r.label, r.value),),
                 difficulty=r.difficulty, notes=r.notes, source=SOURCE,
             )
         )

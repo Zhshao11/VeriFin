@@ -30,12 +30,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
+
+from .aliases import normalize_question
 
 __all__ = [
     "DocConstraints",
     "label_consistency",
     "check_question_constraints",
+    "detect_ambiguous_abbreviation",
     "normalize_label_for_match",
     "best_label_match",
 ]
@@ -129,6 +132,34 @@ def normalize_label_for_match(text: str) -> str:
     return _NON_WORD_RE.sub("", out)
 
 
+def detect_ambiguous_abbreviation(question: str) -> dict[str, Any] | None:
+    """问句里有没有**有歧义的口语简称**（如「营收」「现金流」）。
+
+    通过返回 `None`，命中返回 `{"key": 简称, "options": (候选科目, ...)}`。
+
+    **为什么这条判定要单独抽出来、而不是散在各个入口里。**
+    这条规则原先只在 `web/server.py` 的 `/api/ask` 里实现了一遍，而 Agent 层
+    （CLI 与评测走的那条路）完全没有 —— 同一句「2024年现金流是多少」，
+    网页给的是明确的 `AMBIGUOUS_ABBREVIATION`，Agent 层给的却是笼统的
+    `LABEL_MISMATCH`。这不是"两个入口措辞不同"，而是**两条验证路径又漂移了**：
+    护栏只接进了一条路，另一条路就少一道闸。P-022 记的正是同一类问题
+    （评测执行器 / 演示 / 网页各装配一遍运行时，量到的可能不是同一个系统）。
+
+    归一化规则本身在 :mod:`verifin.aliases`（与检索层、:func:`label_consistency` 同源），
+    这里只负责把它的产出**翻译成上层可直接用的拒答依据**：
+    命中多个时取最长者，与 :func:`verifin.aliases.normalize_question` 的最长优先
+    保持一致 —— 取最长才能与替换行为同口径。
+
+    Returns:
+        `None` 或 `{"key": str, "options": tuple[str, ...]}`。
+    """
+    norm = normalize_question(question)
+    if not norm.has_ambiguous:
+        return None
+    key, options = max(norm.ambiguous, key=lambda item: (len(item[0]), item[0]))
+    return {"key": key, "options": tuple(options)}
+
+
 def best_label_match(question: str, known_labels: Iterable[str]) -> str | None:
     """在问句里找出**被提到的最具体的报表科目**。
 
@@ -137,8 +168,12 @@ def best_label_match(question: str, known_labels: Iterable[str]) -> str | None:
     为什么要取最长：「净利润」是「归属于母公司股东的净利润」的子串。
     只判断"包含"，问句问的是归母净利润时，「净利润」也会被判定为"被问到了"，
     于是取错行也放行。取最长就自然消解了这种嵌套。
+
+    问句先做口语简称归一（P-030），与检索层、:func:`label_consistency` 同一规则：
+    DIFF 题的两个操作数也是从问句里抠科目名，问「经营现金流与投资现金流的差额」
+    时若不展开，两个操作数都抠不出来，路由此处就会静默退化成查表单值。
     """
-    qn = normalize_label_for_match(question)
+    qn = normalize_label_for_match(normalize_question(question).expanded)
     if not qn:
         return None
     best: str | None = None
@@ -185,7 +220,14 @@ def label_consistency(
         return False, "没有取到任何科目"
 
     labels = list(known_labels)
-    qn = normalize_label_for_match(question)
+    # 问句先做口语简称归一（P-030），与检索层用同一条规则。
+    #
+    # 为什么这道护栏也必须归一：它是**判定"取到的行是不是问的那一行"**的地方。
+    # 检索层已经用展开后的问句取到了「经营活动产生的现金流量净额」，
+    # 若这里拿**未展开的原句**去比对，问句里就没有任何已知科目名，
+    # 于是第 1 步判成"没点名任何科目" → 把刚刚答对的问题误拒。
+    # 两处不归一，等于亲手把修好的链路再堵上一次。
+    qn = normalize_label_for_match(normalize_question(question).expanded)
     chosen_n = normalize_label_for_match(chosen_label)
 
     named = [

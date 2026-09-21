@@ -302,6 +302,82 @@ def test_alias_maps_canonical_name_to_disclosed_name():
 
 
 # --------------------------------------------------------------------------
+# P-030 口语简称：歧义简称必须在 Agent 层也拒答（不能只在 web 层拦）
+# --------------------------------------------------------------------------
+
+
+def test_ambiguous_abbreviation_refused_at_agent_layer():
+    """Agent 层必须也能识别有歧义的口语简称并给出**明确原因**。
+
+    缺陷原形：这段判定原先只活在 `web/server.py` 的 `/api/ask` 里，
+    而 Agent 层（CLI、评测走的路）完全没有 —— 同一句「2024年现金流是多少」，
+    网页报 `AMBIGUOUS_ABBREVIATION`（用户知道该指明哪一行），
+    Agent 层却报笼统的 `LABEL_MISMATCH`（用户不知道该怎么改）。
+    护栏只接进一条路径，另一条就少一道闸 —— 与 P-022 同类。
+
+    这条测试断言的是**原因本身**，不是"拒答了就行"：
+    笼统拒答与"指明歧义候选"是两种用户体验，前者会把人带偏。
+    """
+    agent = VeriFinAgent(_runtime())
+    result = agent.run("2024年现金流是多少")
+    assert result.decision == "REFUSE"
+    assert result.refusal["reason"] == "AMBIGUOUS_ABBREVIATION"
+    # 必须告知"可能指哪几行"，否则用户无从澄清
+    options = result.refusal["ambiguous_options"]
+    assert len(options) >= 2, "歧义简称的拒答必须列出多个候选"
+
+
+def test_ambiguous_refusal_happens_before_any_tool_call():
+    """歧义简称在**任何工具被调用之前**就判掉 —— 不空转、不吃预算。
+
+    顺带证明这条判定与检索无关：`_runtime()` 里的假索引根本没有报告里的
+    现金流量表科目，若判定依赖召回，这条必红。
+    """
+    agent = VeriFinAgent(_runtime())
+    result = agent.run("2024年营收是多少")
+    assert result.decision == "REFUSE"
+    assert result.refusal["reason"] == "AMBIGUOUS_ABBREVIATION"
+    assert result.tool_calls == 0, "歧义判定应当先于任何工具调用（前置检查，不空转）"
+    assert result.steps == [], "前置拒答不应产生任何图步骤"
+
+
+def test_unambiguous_abbreviation_still_answers():
+    """反向对照：加歧义判定不得把**确定性**简称也一起拦掉。
+
+    断言刻意只要求「**不是因为歧义而被拒**」，不要求「答对」：
+    本文件用的是内存假索引，它只有四个科目，要求答对会把测试耦合到
+    fixture 的内容上 —— 那时红/绿反映的是假索引里有没有那一行，
+    而不是我关心的这条规则（"确定性简称不该被歧义判定误伤"）。
+    规则本身答对与否，由 `tests/test_aliases.py::TestAgainstRealReport` 用真实索引守。
+    """
+    agent = VeriFinAgent(_runtime())
+    result = agent.run("2024年归母净利润是多少")
+    reason = (result.refusal or {}).get("reason")
+    assert reason != "AMBIGUOUS_ABBREVIATION", (
+        "「归母净利润」有唯一对应行，不该被判成歧义简称"
+    )
+
+
+def test_report_name_is_not_mistaken_for_abbreviation():
+    """「现金流量表」这个高频**报表名**不得被当成歧义简称「现金流」。
+
+    这是一个真实回归：歧义键「现金流」是「现金流量表」的前缀，
+    一旦条件放宽，问「2024年合并现金流量表的货币资金是多少」会被判成
+    用了有歧义的简称并拒答 —— 而用户根本没写任何简称。
+
+    同样只断言「不是被歧义判定拦下」：假索引没有带口径标签的块，
+    问句点名「合并」时本就会因取不到该口径的行而拒答（`SCOPE_NOT_AVAILABLE`）。
+    那是 fixture 的限制，与本题要守的规则无关。
+    """
+    agent = VeriFinAgent(_runtime())
+    result = agent.run("2024年合并现金流量表的营业收入是多少")
+    reason = (result.refusal or {}).get("reason")
+    assert reason != "AMBIGUOUS_ABBREVIATION", (
+        "报表名「现金流量表」被误判成歧义简称"
+    )
+
+
+# --------------------------------------------------------------------------
 # 预算控制
 # --------------------------------------------------------------------------
 

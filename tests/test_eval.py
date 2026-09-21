@@ -476,6 +476,66 @@ def test_expected_answer_but_refused_is_a_miss() -> None:
     assert res.failure == "未作答（REFUSE）"
 
 
+# --- expected_refusal_code：拒答「对不对」与「为不为什么」是两件事 -------------
+
+
+def test_refusal_code_matching_passes() -> None:
+    """标注了机器原因且实际原因一致 —— 拒得明白，判过。"""
+    item = refusal_item(expected_refusal_code="AMBIGUOUS_ABBREVIATION")
+    res = compare(item, run_result("REFUSE", refusal={"reason": "AMBIGUOUS_ABBREVIATION"}))
+    assert res.passed
+    assert res.failure == ""
+    assert res.detail == "AMBIGUOUS_ABBREVIATION"
+
+
+def test_refusal_code_mismatch_fails() -> None:
+    """**这条测试守住 P-030 的核心**：修前系统也拒答，只是理由是笼统的
+    `LABEL_MISMATCH`。若判分只比"有没有拒答"，这条题对缺陷零约束力 ——
+    一个把所有问句都拒答的废系统同样能过。必须是"拒了，但不是因为这个理由"。"""
+    item = refusal_item(expected_refusal_code="AMBIGUOUS_ABBREVIATION")
+    res = compare(item, run_result("REFUSE", refusal={"reason": "LABEL_MISMATCH"}))
+    assert not res.passed
+    assert res.failure == "拒答原因不符"
+    assert "AMBIGUOUS_ABBREVIATION" in res.detail
+    assert "LABEL_MISMATCH" in res.detail
+
+
+def test_refusal_code_missing_actual_reason_fails() -> None:
+    """系统拒答了却没带机器原因（`refusal` 为空或没 `reason`）——
+    在标注了期望原因时必须判失败，不能把「没理由」当成「拒对了」。"""
+    item = refusal_item(expected_refusal_code="AMBIGUOUS_ABBREVIATION")
+    res = compare(item, run_result("REFUSE", refusal={"detail": "只有描述，没有 reason"}))
+    assert not res.passed
+    assert res.failure == "拒答原因不符"
+    assert "（无）" in res.detail
+
+
+def test_refusal_code_absent_falls_back_to_whether_only() -> None:
+    """没填 `expected_refusal_code` 时退回旧口径（只比是否拒答）——
+    保证既有 R 题不受影响，也说明这个字段是**可选叠加**而非破坏性改动。"""
+    res = compare(refusal_item(), run_result("REFUSE", refusal={"reason": "WHATEVER"}))
+    assert res.passed
+
+
+def test_abort_still_fails_even_with_matching_code() -> None:
+    """`ABORT`（预算耗尽）即使碰巧带了期望原因也不算正确拒答 ——
+    它压根没走到拒答决策那一步。"""
+    item = refusal_item(expected_refusal_code="AMBIGUOUS_ABBREVIATION")
+    res = compare(
+        item,
+        run_result("ABORT", refusal={"reason": "AMBIGUOUS_ABBREVIATION"}),
+    )
+    assert not res.passed
+    assert res.failure == "ABORT"
+
+
+def test_expected_refusal_code_rejected_on_answerable_item() -> None:
+    """可答题带 `expected_refusal_code` 是题面配置错误 —— 校验层必须拦住，
+    否则会把"给一个应答题标注拒答原因"这种自相矛盾的题混进题库。"""
+    problems = validate_item(l1_item(expected_refusal_code="AMBIGUOUS_ABBREVIATION"))
+    assert any("expected_refusal_code" in p for p in problems)
+
+
 def test_degradation_is_read_from_step_sources_not_assumed() -> None:
     """降级率必须从轨迹的 `source` 字段读出来，不能凭印象。"""
     steps = [

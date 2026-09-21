@@ -36,8 +36,13 @@ from verifin.agent import (  # noqa: E402
     render_graph_text,
 )
 from verifin.agent.planner import LLMPlanner  # noqa: E402
+from verifin.aliases import normalize_question  # noqa: E402
 from verifin.formulas import FORMULA_REGISTRY, evaluate_formula  # noqa: E402
 from verifin.geometry import open_pdf  # noqa: E402
+from verifin.guards import (  # noqa: E402
+    detect_ambiguous_abbreviation,
+    label_consistency,
+)
 from verifin.span import verify_evidence  # noqa: E402
 from verifin.runtime import build_document_runtime  # noqa: E402
 
@@ -184,6 +189,27 @@ def _stage(name: str, status: str, detail: str) -> dict:
     return {"stage": name, "status": status, "detail": detail}
 
 
+def _known_labels(b) -> tuple[str, ...]:
+    """取该报告的**全部**已知科目名（含各口径），供问答一致性护栏使用。
+
+    为什么必须在 web 层也拿到这一份：`label_consistency` 要在它上面判断
+    「问句点名了哪个科目」。漏掉母公司那套，会让「母公司资产总计是多少」
+    被判成"没点名任何科目"而误拒。
+
+    为什么要缓存：每次请求都遍历全部 chunk 重建一个 200+ 元素的元组是白费功夫，
+    而这些 chunk 在服务启动后就固定不变（`BUNDLES` 在启动期一次性装载）。
+    缓存挂在运行时对象上，不引入模块级全局字典 ——
+    模块级缓存会在多文档之间共享、把 A 报告的科目名答给 B 报告。
+    """
+    cached = getattr(b, "_known_labels_cache", None)
+    if cached is None:
+        cached = tuple(dict.fromkeys(c.label for c in b.chunks))
+        # 运行时是 dataclass，允许挂附加属性；不改其字段定义，
+        # 因为这是纯粹的展示层优化，不该污染领域模型。
+        object.__setattr__(b, "_known_labels_cache", cached)
+    return cached
+
+
 # --------------------------------------------------------------------------
 # 请求/响应模型
 # --------------------------------------------------------------------------
@@ -231,6 +257,50 @@ def ask(req: AskRequest) -> dict:
     question = req.question.strip()
     b = get_bundle(req.doc)
     trace: list[dict] = []
+
+    # ---- 0. 口语简称归一（P-030）----
+    # 检索层内部也会做同一归一（`RetrievalIndex.retrieve` 首行），这里再做一次
+    # 的目的不同：是为了把**歧义简称**在进检索前就识别出来并给出**明确的拒答原因**。
+    # 不这么做的话，「营收」会因为没有一行叫这个名字而退化成笼统的 NO_RECALL，
+    # 用户看到的是"报告里没有" —— 而事实是"你问的这个词对应两行，请指明哪一行"。
+    # 指错方向比不给答案更难排查。
+    #
+    # 判定逻辑本身在 `verifin.guards.detect_ambiguous_abbreviation` —— 原先这段
+    # 只活在 web 层，Agent 层（CLI / 评测走的路）完全没有，于是同一句
+    # 「2024年现金流是多少」在网页报 `AMBIGUOUS_ABBREVIATION`、在 Agent 层报
+    # 笼统的 `LABEL_MISMATCH`。护栏接进一条路、漏掉另一条，量到的就不是同一个系统
+    # （P-022 同类）。现在两边共用同一个函数，口径由代码结构保证。
+    ambiguous = detect_ambiguous_abbreviation(question)
+    if ambiguous is not None:
+        key = ambiguous["key"]
+        options = ambiguous["options"]
+        trace.append(_stage(
+            "简称归一", "warn",
+            f"「{key}」是有歧义的口语简称，报表里对应多行：{('、'.join(options))}",
+        ))
+        trace.append(_stage(
+            "拒答判定", "fail",
+            "有歧义的口语简称：候选科目数值各不相同，不替用户猜",
+        ))
+        return {
+            "question": question,
+            "decision": "refuse",
+            "refuse_reason": "AMBIGUOUS_ABBREVIATION",
+            "refuse_detail": (
+                f"「{key}」在本报告里对应多个科目，数值各不相同："
+                f"{('、'.join(options))}。"
+                "系统不替你猜是哪一行 —— 请指明具体科目名（或补上「合并 / 母公司」口径）。"
+            ),
+            "ambiguous_options": list(options),
+            "per_channel": {},
+            "candidates": [],
+            "trace": trace,
+        }
+    norm = normalize_question(question)
+    if norm.expanded != question:
+        trace.append(_stage(
+            "简称归一", "ok", f"「{question}」→「{norm.expanded}」",
+        ))
 
     # ---- 1. 四路召回 ----
     with b.index_lock:
@@ -320,6 +390,42 @@ def ask(req: AskRequest) -> dict:
     else:
         trace.append(_stage("证据选取", "ok", f"取 RRF top-1「{chunk.label}」"))
     trace.append(_stage("数值归一化", "ok", f"{raw_value} → Decimal（单位：{b.unit}）"))
+
+    # ---- 3.5 问答一致性（P-030 第二层）----
+    # 这道检查必须在这里、且必须存在。
+    #
+    # 为什么：数值真实、页码正确、span 通过 —— 前面所有关卡校验的都是
+    # 「这个数是不是原文里的」，而不是「是不是问句问的」。
+    # 实测（P-030）：问「经营现金流」时取到「支付其他与经营活动有关的现金」，
+    # 数值真、页码真、span 过，上面每一道关卡都放行，用户拿到一个
+    # **看起来完全正确、实际答非所问**的财务数字。
+    #
+    # 为什么不能只在 Agent 层做：`/api/ask` 与 Agent 层是两条独立入口，
+    # 护栏写在一条上，换个入口就绕过去了 —— 这正是 P-030 第二层的成因：
+    # `label_consistency`（P-024 加的）只接进了 Agent 层，
+    # 而演示页这条路径当时没人回头看。所以此处复用**同一个**函数，
+    # 不另写一套判定。
+    consistent, why = label_consistency(
+        question, chunk.label, _known_labels(b)
+    )
+    trace.append(_stage(
+        "问答一致性",
+        "ok" if consistent else "fail",
+        why,
+    ))
+    if not consistent:
+        return {
+            "question": question,
+            "decision": "refuse",
+            "refuse_reason": "LABEL_MISMATCH",
+            "refuse_detail": (
+                f"{why} —— 数值真实、页码正确、span 校验通过也一律不采纳："
+                "这些关卡只能证明「数字在原文里」，证明不了「它就是被问的那一行」。"
+            ),
+            "per_channel": per_channel,
+            "candidates": candidates,
+            "trace": trace,
+        }
 
     # ---- 3. span 硬校验（两层关卡）----
     claimed_span = _claimed_fragment(chunk.text, raw_value or "")
