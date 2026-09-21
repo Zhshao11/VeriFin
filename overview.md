@@ -25,7 +25,7 @@
 ### 启动（一行）
 
 ```bash
-cd /Users/shihao/WorkBuddy/2026-09-19-02-37-19
+cd <仓库根目录>
 .venv/bin/python -m uvicorn web.server:app --port 8765
 # 浏览器打开 http://127.0.0.1:8765
 ```
