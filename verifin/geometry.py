@@ -341,7 +341,7 @@ class PdfGeometry:
         color: tuple[float, float, float] = (1.0, 0.85, 0.2),
         opacity: float = 0.45,
     ) -> Path:
-        """把若干坐标框高亮渲染成 PNG，用于人工复核与面试演示。
+        """把若干坐标框高亮渲染成 PNG，用于人工复核与演示。
 
         Args:
             page: 1-based 页码。

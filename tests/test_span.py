@@ -1,6 +1,6 @@
 """span 硬校验测试。
 
-对应面试追问：「你怎么保证模型不编数字？」
+对应关键问题：「怎么保证模型不编数字？」
 
 核心测试是 :class:`TestVerifyEvidence` 里的
 ``test_rejects_real_span_with_wrong_value``——
